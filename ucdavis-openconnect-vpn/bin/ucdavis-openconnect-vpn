@@ -95,6 +95,52 @@ resolve_ping_target() {
   fi
 }
 
+default_route_info() {
+  /sbin/route -n get default 2>/dev/null | awk '
+    /gateway:/ { gateway=$2 }
+    /interface:/ { iface=$2 }
+    END { if (gateway || iface) print gateway "|" iface }
+  '
+}
+
+vpn_server_route_info() {
+  /sbin/route -n get "$SERVER" 2>/dev/null | awk '
+    /route to:/ { route=$3 }
+    /gateway:/ { gateway=$2 }
+    /interface:/ { iface=$2 }
+    END { if (route || gateway || iface) print route "|" gateway "|" iface }
+  '
+}
+
+repair_stale_vpn_server_route() {
+  local server_info default_info
+  server_info="$(vpn_server_route_info || true)"
+  default_info="$(default_route_info || true)"
+  [[ -n "$server_info" && -n "$default_info" ]] || return 0
+
+  local -a server_parts default_parts
+  server_parts=("${(@ps:|:)server_info}")
+  default_parts=("${(@ps:|:)default_info}")
+
+  local server_ip="${server_parts[1]:-}"
+  local server_gateway="${server_parts[2]:-}"
+  local server_iface="${server_parts[3]:-}"
+  local default_gateway="${default_parts[1]:-}"
+  local default_iface="${default_parts[2]:-}"
+
+  if [[ -n "$server_ip" && -n "$server_gateway" && -n "$default_gateway" &&
+        "$server_iface" == "$default_iface" && "$server_gateway" != "$default_gateway" ]]; then
+    print "VPN server route looks stale: $server_ip via $server_gateway on $server_iface; default is $default_gateway."
+    local -a sudo_cmd
+    sudo_cmd=()
+    if [[ "$USE_SUDO" == "1" ]]; then
+      /usr/bin/sudo -v
+      sudo_cmd=(/usr/bin/sudo)
+    fi
+    "${sudo_cmd[@]}" /sbin/route -n delete "$server_ip" >/dev/null 2>&1 || true
+  fi
+}
+
 ping_target_ok() {
   local target="$1"
   [[ -n "$target" ]] || return 1
@@ -180,9 +226,23 @@ command_status() {
   cdp="$(chrome_cdp_status || true)"
   [[ -n "$cdp" ]] || cdp="not listening"
 
+  local server_info default_info server_route_status=""
+  server_info="$(vpn_server_route_info || true)"
+  default_info="$(default_route_info || true)"
+  if [[ -n "$server_info" ]]; then
+    local -a server_parts default_parts
+    server_parts=("${(@ps:|:)server_info}")
+    default_parts=("${(@ps:|:)default_info}")
+    if [[ -n "${default_parts[1]:-}" && "${server_parts[3]:-}" == "${default_parts[2]:-}" &&
+          -n "${server_parts[2]:-}" && "${server_parts[2]:-}" != "${default_parts[1]:-}" ]]; then
+      server_route_status=" stale; default gateway ${default_parts[1]}"
+    fi
+  fi
+
   print "OpenConnect: $process_status"
   print "VPN IP:       $ip"
   print "Ping:         $ping_status"
+  [[ -n "$server_info" ]] && print "VPN gateway:  ${server_parts[1]:-unknown} via ${server_parts[2]:-unknown} on ${server_parts[3]:-unknown}${server_route_status}"
   print "Chrome CDP:   $cdp"
   if [[ -f "$COOKIE_META_FILE" ]]; then
     print "Cookie meta:  $COOKIE_META_FILE"
@@ -228,6 +288,7 @@ command_cookie() {
     print -u2 "UC_DAVIS_EMAIL is required. Configure $CONFIG_FILE."
     return 1
   fi
+  repair_stale_vpn_server_route
   local json
   json="$(acquire_cookie_json "$@")"
   print -r -- "$json" | write_cookie_meta
@@ -270,11 +331,20 @@ command_connect() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
     if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
-      print "OpenConnect already running (pid $pid)."
-      command_status
-      return 0
+      local target
+      target="$(resolve_ping_target || true)"
+      if [[ -n "$target" ]] && ping_target_ok "$target"; then
+        print "OpenConnect already running (pid $pid)."
+        command_status
+        return 0
+      fi
+      print "OpenConnect is running (pid $pid), but the ping target is not reachable; reconnecting."
+      signal_openconnect HUP
+      sleep 2
     fi
   fi
+
+  repair_stale_vpn_server_route
 
   local json cookie
   json="$(acquire_cookie_json)"

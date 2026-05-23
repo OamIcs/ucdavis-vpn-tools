@@ -177,6 +177,46 @@ resolve_ping_target() {
   fi
 }
 
+default_route_info() {
+  /sbin/route -n get default 2>/dev/null | /usr/bin/awk '
+    /gateway:/ { gateway=$2 }
+    /interface:/ { iface=$2 }
+    END { if (gateway || iface) print gateway "|" iface }
+  '
+}
+
+vpn_server_route_info() {
+  /sbin/route -n get "$SERVER" 2>/dev/null | /usr/bin/awk '
+    /route to:/ { route=$3 }
+    /gateway:/ { gateway=$2 }
+    /interface:/ { iface=$2 }
+    END { if (route || gateway || iface) print route "|" gateway "|" iface }
+  '
+}
+
+repair_stale_vpn_server_route() {
+  local server_info default_info
+  server_info="$(vpn_server_route_info || true)"
+  default_info="$(default_route_info || true)"
+  [[ -n "$server_info" && -n "$default_info" ]] || return 0
+
+  local -a server_parts default_parts
+  server_parts=("${(@ps:|:)server_info}")
+  default_parts=("${(@ps:|:)default_info}")
+
+  local server_ip="${server_parts[1]:-}"
+  local server_gateway="${server_parts[2]:-}"
+  local server_iface="${server_parts[3]:-}"
+  local default_gateway="${default_parts[1]:-}"
+  local default_iface="${default_parts[2]:-}"
+
+  if [[ -n "$server_ip" && -n "$server_gateway" && -n "$default_gateway" &&
+        "$server_iface" == "$default_iface" && "$server_gateway" != "$default_gateway" ]]; then
+    log "VPN server route looks stale: $server_ip via $server_gateway on $server_iface; default is $default_gateway. Deleting route before reconnect."
+    /sbin/route -n delete "$server_ip" >/dev/null 2>&1 || true
+  fi
+}
+
 ping_target_ok() {
   local target="$1"
   [[ -n "$target" ]] || return 1
@@ -192,7 +232,13 @@ vpn_internal_ip() {
 
 any_openconnect() {
   /bin/ps -axo user=,pid=,command= |
-    /usr/bin/awk '/[o]penconnect/ { print; found=1 } END { exit found ? 0 : 1 }'
+    /usr/bin/awk '
+      /(^|[[:space:]])([^[:space:]]*\/)?[o]penconnect([[:space:]]|$)/ {
+        print
+        found=1
+      }
+      END { exit found ? 0 : 1 }
+    '
 }
 
 user_gui_available() {
@@ -336,9 +382,18 @@ command_connect() {
   require_root
   local pid
   if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
-    log "OpenConnect already running as pid $pid."
-    return 0
+    local target
+    target="$(resolve_ping_target || true)"
+    if [[ -n "$target" ]] && ping_target_ok "$target"; then
+      log "OpenConnect already running as pid $pid."
+      return 0
+    fi
+    log "OpenConnect is running as pid $pid, but the ping target is not reachable; reconnecting."
+    signal_tracked_openconnect HUP
+    sleep 2
   fi
+
+  repair_stale_vpn_server_route
 
   local target
   target="$(resolve_ping_target || true)"
@@ -390,12 +445,25 @@ command_status() {
   ip="$(vpn_internal_ip || true)"
   [[ -n "$ip" ]] || ip="not found"
   any="$(any_openconnect 2>/dev/null || true)"
+  local server_info default_info server_route_status=""
+  server_info="$(vpn_server_route_info || true)"
+  default_info="$(default_route_info || true)"
+  if [[ -n "$server_info" ]]; then
+    local -a server_parts default_parts
+    server_parts=("${(@ps:|:)server_info}")
+    default_parts=("${(@ps:|:)default_info}")
+    if [[ -n "${default_parts[1]:-}" && "${server_parts[3]:-}" == "${default_parts[2]:-}" &&
+          -n "${server_parts[2]:-}" && "${server_parts[2]:-}" != "${default_parts[1]:-}" ]]; then
+      server_route_status=" stale; default gateway ${default_parts[1]}"
+    fi
+  fi
 
   print "Label:        $LABEL"
   print "Config:       $CONFIG_FILE"
   print "Tracked:      $(tracked_pid_status)"
   print "VPN IP:       $ip"
   print "Ping:         $ping_status"
+  [[ -n "$server_info" ]] && print "VPN gateway:  ${server_parts[1]:-unknown} via ${server_parts[2]:-unknown} on ${server_parts[3]:-unknown}${server_route_status}"
   print "OpenConnect processes:"
   if [[ -n "$any" ]]; then
     print -r -- "$any" | sed 's/^/  /'

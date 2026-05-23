@@ -5,6 +5,7 @@ CONFIG_FILE="${UCD_OPENCONNECT_CONFIG:-$HOME/.config/ucdavis-openconnect-vpn/con
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
 SCRIPT_DIR="${0:A:h}"
+PROGRAM_NAME="${0:t}"
 SERVER="${SERVER:-vpn.engineering.ucdavis.edu}"
 UC_DAVIS_EMAIL="${UC_DAVIS_EMAIL:-}"
 KEYCHAIN_SERVICE="${KEYCHAIN_SERVICE:-ucdavis-openconnect-vpn}"
@@ -54,7 +55,7 @@ NODE_BIN="$(find_node || true)"
 
 usage() {
   cat <<EOF
-Usage: ${0:t} <command>
+Usage: $PROGRAM_NAME <command>
 
 Commands:
   status        Show openconnect process, VPN IP, and target reachability.

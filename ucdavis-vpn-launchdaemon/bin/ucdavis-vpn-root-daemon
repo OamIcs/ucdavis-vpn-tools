@@ -3,6 +3,7 @@ set -euo pipefail
 
 CONFIG_FILE="/Library/Application Support/ucdavis-vpn-daemon/config.env"
 COMMAND="run"
+PROGRAM_NAME="${0:t}"
 
 while (( $# > 0 )); do
   case "$1" in
@@ -104,7 +105,7 @@ NODE_BIN="$(find_node || true)"
 
 usage() {
   cat <<EOF
-Usage: ${0:t} [--config path] <command>
+Usage: $PROGRAM_NAME [--config path] <command>
 
 Commands:
   run          Long-running launchd mode.

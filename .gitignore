@@ -1,0 +1,11 @@
+.DS_Store
+outputs/
+node_modules/
+openconnect-head-test/
+
+# Local configs/state/logs should never be committed.
+config.env
+*.local
+*.log
+*.pid
+cookie-meta.json

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.ucdavis-openconnect-daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/sbin/ucdavis-vpn-root-daemon</string>
+    <string>--config</string>
+    <string>/Library/Application Support/ucdavis-vpn-daemon/config.env</string>
+    <string>run</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/ucdavis-openconnect-daemon/launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/var/log/ucdavis-openconnect-daemon/launchd.err.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>/var/db/ucdavis-openconnect-daemon</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

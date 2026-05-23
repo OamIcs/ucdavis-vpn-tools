@@ -1,0 +1,513 @@
+#!/bin/zsh
+set -euo pipefail
+
+CONFIG_FILE="/Library/Application Support/ucdavis-vpn-daemon/config.env"
+COMMAND="run"
+
+while (( $# > 0 )); do
+  case "$1" in
+    --config)
+      CONFIG_FILE="$2"
+      shift 2
+      ;;
+    run|once|status|connect|disconnect|logout|doctor)
+      COMMAND="$1"
+      shift
+      ;;
+    -h|--help|help)
+      COMMAND="help"
+      shift
+      ;;
+    *)
+      print -u2 "Unknown argument: $1"
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+LABEL="${LABEL:-local.ucdavis-openconnect-daemon}"
+
+detect_console_user() {
+  /usr/bin/stat -f %Su /dev/console 2>/dev/null
+}
+
+USER_NAME="${USER_NAME:-$(detect_console_user)}"
+[[ "$USER_NAME" == "root" || -z "$USER_NAME" ]] && USER_NAME="${SUDO_USER:-}"
+USER_UID="${USER_UID:-$(/usr/bin/id -u "$USER_NAME" 2>/dev/null || true)}"
+USER_HOME="${USER_HOME:-$(/usr/bin/dscl . -read "/Users/$USER_NAME" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}' || true)}"
+USER_HOME="${USER_HOME:-/Users/$USER_NAME}"
+
+SERVER="${SERVER:-vpn.engineering.ucdavis.edu}"
+UC_DAVIS_EMAIL="${UC_DAVIS_EMAIL:-}"
+KEYCHAIN_SERVICE="${KEYCHAIN_SERVICE:-ucdavis-openconnect-vpn}"
+
+SSH_HOST_ALIAS="${SSH_HOST_ALIAS:-}"
+PING_TARGET="${PING_TARGET:-}"
+PING_COUNT="${PING_COUNT:-2}"
+PING_TIMEOUT_MS="${PING_TIMEOUT_MS:-1500}"
+CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-60}"
+FAILURE_THRESHOLD="${FAILURE_THRESHOLD:-2}"
+RECONNECT_COOLDOWN_SECONDS="${RECONNECT_COOLDOWN_SECONDS:-180}"
+VERIFY_AFTER_CONNECT_SECONDS="${VERIFY_AFTER_CONNECT_SECONDS:-25}"
+AUTO_RECONNECT="${AUTO_RECONNECT:-1}"
+CONNECT_ON_START="${CONNECT_ON_START:-1}"
+
+STATE_DIR="${STATE_DIR:-/var/run/ucdavis-openconnect-daemon}"
+DB_DIR="${DB_DIR:-/var/db/ucdavis-openconnect-daemon}"
+LOG_DIR="${LOG_DIR:-/var/log/ucdavis-openconnect-daemon}"
+PID_FILE="${PID_FILE:-$STATE_DIR/openconnect.pid}"
+COOKIE_META_FILE="${COOKIE_META_FILE:-$DB_DIR/cookie-meta.json}"
+DAEMON_LOG_FILE="${DAEMON_LOG_FILE:-$LOG_DIR/daemon.log}"
+OPENCONNECT_LOG_FILE="${OPENCONNECT_LOG_FILE:-$LOG_DIR/openconnect.log}"
+
+NODE_BIN="${NODE_BIN:-}"
+COOKIE_HELPER="${COOKIE_HELPER:-}"
+OPENCONNECT_BIN="${OPENCONNECT_BIN:-/opt/homebrew/bin/openconnect}"
+VPNC_SCRIPT="${VPNC_SCRIPT:-/opt/homebrew/etc/vpnc/vpnc-script}"
+OPENCONNECT_NO_DTLS="${OPENCONNECT_NO_DTLS:-1}"
+OPENCONNECT_EXTRA_ARGS="${OPENCONNECT_EXTRA_ARGS:-}"
+
+CHROME_PROFILE_DIR="${CHROME_PROFILE_DIR:-$USER_HOME/.local/state/ucdavis-vpn-chrome-profile}"
+CHROME_CDP_PORT="${CHROME_CDP_PORT:-9223}"
+CHROME_APP="${CHROME_APP:-Google Chrome}"
+CLOSE_WINDOW_AFTER_COOKIE="${CLOSE_WINDOW_AFTER_COOKIE:-1}"
+
+mkdir -p "$STATE_DIR" "$DB_DIR" "$LOG_DIR" 2>/dev/null || true
+
+find_node() {
+  if [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]; then
+    print -r -- "$NODE_BIN"
+    return 0
+  fi
+  if [[ -x /opt/homebrew/bin/node ]]; then
+    print -r -- /opt/homebrew/bin/node
+    return 0
+  fi
+  if [[ -x /usr/local/bin/node ]]; then
+    print -r -- /usr/local/bin/node
+    return 0
+  fi
+  if command -v node >/dev/null 2>&1; then
+    command -v node
+    return 0
+  fi
+  if [[ -x /Applications/Codex.app/Contents/Resources/node ]]; then
+    print -r -- /Applications/Codex.app/Contents/Resources/node
+    return 0
+  fi
+  return 1
+}
+
+NODE_BIN="$(find_node || true)"
+
+usage() {
+  cat <<EOF
+Usage: ${0:t} [--config path] <command>
+
+Commands:
+  run          Long-running launchd mode.
+  once         Run one monitor check.
+  status       Print tracked OpenConnect, VPN IP, ping, and cookie metadata.
+  connect      Connect now, using or refreshing the browser cookie.
+  disconnect   Send SIGHUP to OpenConnect, preserving the web login session.
+  logout       Send SIGTERM to OpenConnect, logging out the VPN session.
+  doctor       Check dependencies and root/user context.
+
+Config:
+  $CONFIG_FILE
+EOF
+}
+
+timestamp() {
+  /bin/date "+%Y-%m-%d %H:%M:%S%z"
+}
+
+log() {
+  local line="[$(timestamp)] $*"
+  print -r -- "$line"
+  print -r -- "$line" >> "$DAEMON_LOG_FILE"
+}
+
+require_root() {
+  if [[ "$(id -u)" != "0" ]]; then
+    print -u2 "This command must run as root."
+    exit 1
+  fi
+}
+
+pid_from_file() {
+  [[ -f "$PID_FILE" ]] || return 1
+  local pid
+  pid="$(<"$PID_FILE")"
+  [[ "$pid" == <-> ]] || return 1
+  print -r -- "$pid"
+}
+
+pid_running() {
+  local pid="$1"
+  kill -0 "$pid" >/dev/null 2>&1 || ps -p "$pid" -o pid= >/dev/null 2>&1
+}
+
+tracked_pid_status() {
+  local pid
+  if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
+    print -r -- "running (pid $pid)"
+  else
+    print -r -- "stopped"
+  fi
+}
+
+resolve_ping_target() {
+  if [[ -n "$PING_TARGET" ]]; then
+    print -r -- "$PING_TARGET"
+    return 0
+  fi
+  if [[ -n "$SSH_HOST_ALIAS" ]]; then
+    if [[ "$(id -u)" == "$USER_UID" ]]; then
+      HOME="$USER_HOME" /usr/bin/ssh -G "$SSH_HOST_ALIAS" 2>/dev/null |
+        /usr/bin/awk 'tolower($1) == "hostname" { print $2; exit }'
+    else
+      /usr/bin/sudo -u "$USER_NAME" HOME="$USER_HOME" /usr/bin/ssh -G "$SSH_HOST_ALIAS" 2>/dev/null |
+        /usr/bin/awk 'tolower($1) == "hostname" { print $2; exit }'
+    fi
+    return 0
+  fi
+}
+
+ping_target_ok() {
+  local target="$1"
+  [[ -n "$target" ]] || return 1
+  /sbin/ping -q -c "$PING_COUNT" -W "$PING_TIMEOUT_MS" "$target" >/dev/null 2>&1
+}
+
+vpn_internal_ip() {
+  /sbin/ifconfig | /usr/bin/awk '
+    /^utun[0-9]+:/ { iface=$1; sub(":", "", iface) }
+    $1 == "inet" && $2 ~ /^172\.2[0-9]\./ { print iface " " $2; exit }
+  '
+}
+
+any_openconnect() {
+  /bin/ps -axo user=,pid=,command= |
+    /usr/bin/awk '/[o]penconnect/ { print; found=1 } END { exit found ? 0 : 1 }'
+}
+
+user_gui_available() {
+  /bin/launchctl print "gui/$USER_UID" >/dev/null 2>&1
+}
+
+run_cookie_helper() {
+  [[ -n "$USER_NAME" && -n "$USER_UID" && -n "$USER_HOME" ]] || {
+    log "USER_NAME, USER_UID, and USER_HOME must be configured."
+    return 1
+  }
+  [[ -n "$UC_DAVIS_EMAIL" ]] || {
+    log "UC_DAVIS_EMAIL must be configured."
+    return 1
+  }
+  [[ -n "$COOKIE_HELPER" ]] || {
+    log "COOKIE_HELPER must be configured."
+    return 1
+  }
+  user_gui_available || {
+    log "GUI session gui/$USER_UID is not available; cannot refresh browser cookie yet."
+    return 1
+  }
+  [[ -x "$NODE_BIN" ]] || {
+    log "Node binary not executable: $NODE_BIN"
+    return 1
+  }
+  [[ -f "$COOKIE_HELPER" ]] || {
+    log "Cookie helper missing: $COOKIE_HELPER"
+    return 1
+  }
+
+  /bin/launchctl asuser "$USER_UID" /usr/bin/sudo -u "$USER_NAME" \
+    /usr/bin/env \
+      HOME="$USER_HOME" \
+      USER="$USER_NAME" \
+      LOGNAME="$USER_NAME" \
+      PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+      UCD_VPN_SERVER="$SERVER" \
+      UCD_VPN_EMAIL="$UC_DAVIS_EMAIL" \
+      UCD_VPN_KEYCHAIN_SERVICE="$KEYCHAIN_SERVICE" \
+      UCD_VPN_PROFILE_DIR="$CHROME_PROFILE_DIR" \
+      UCD_VPN_CDP_PORT="$CHROME_CDP_PORT" \
+      UCD_VPN_CHROME_APP="$CHROME_APP" \
+      UCD_VPN_CLOSE_WINDOW_AFTER_COOKIE="$CLOSE_WINDOW_AFTER_COOKIE" \
+      "$NODE_BIN" "$COOKIE_HELPER" --json "$@"
+}
+
+json_field() {
+  local field="$1"
+  "$NODE_BIN" -e '
+    const field = process.argv[1];
+    let data = "";
+    process.stdin.on("data", chunk => data += chunk);
+    process.stdin.on("end", () => {
+      const json = JSON.parse(data);
+      const value = json[field];
+      if (Array.isArray(value)) process.stdout.write(value.join(", "));
+      else if (value !== undefined && value !== null) process.stdout.write(String(value));
+    });
+  ' "$field"
+}
+
+write_cookie_meta() {
+  "$NODE_BIN" -e '
+    let data = "";
+    process.stdin.on("data", chunk => data += chunk);
+    process.stdin.on("end", () => {
+      const json = JSON.parse(data);
+      delete json.cookie;
+      process.stdout.write(JSON.stringify(json, null, 2) + "\n");
+    });
+  ' > "$COOKIE_META_FILE"
+}
+
+openconnect_args() {
+  local -a args
+  args=(
+    "$OPENCONNECT_BIN"
+    --protocol=nc
+    --cookie-on-stdin
+    --background
+    --pid-file "$PID_FILE"
+    --script "$VPNC_SCRIPT"
+  )
+  [[ "$OPENCONNECT_NO_DTLS" == "1" ]] && args+=(--no-dtls)
+  if [[ -n "$OPENCONNECT_EXTRA_ARGS" ]]; then
+    args+=(${=OPENCONNECT_EXTRA_ARGS})
+  fi
+  args+=("$SERVER")
+  print -r -- "${(@q)args}"
+}
+
+signal_tracked_openconnect() {
+  local signal="$1"
+  local pid
+  pid="$(pid_from_file 2>/dev/null)" || return 0
+  if ! pid_running "$pid"; then
+    rm -f "$PID_FILE"
+    return 0
+  fi
+  kill "-$signal" "$pid" >/dev/null 2>&1 || true
+  sleep 1
+  [[ "$signal" == "HUP" || "$signal" == "TERM" ]] && rm -f "$PID_FILE"
+}
+
+start_openconnect_with_cookie() {
+  local json="$1"
+  local cookie
+  print -r -- "$json" | write_cookie_meta
+  cookie="$(print -r -- "$json" | json_field cookie)"
+  [[ -n "$cookie" ]] || {
+    log "No VPN cookie available."
+    return 1
+  }
+
+  [[ -x "$OPENCONNECT_BIN" ]] || {
+    log "OpenConnect missing: $OPENCONNECT_BIN"
+    return 1
+  }
+  [[ -x "$VPNC_SCRIPT" ]] || {
+    log "vpnc-script missing: $VPNC_SCRIPT"
+    return 1
+  }
+
+  local -a args
+  args=(${(Q)${(z)$(openconnect_args)}})
+  log "Starting OpenConnect."
+  if ! print -rn -- "$cookie" | "${args[@]}" >> "$OPENCONNECT_LOG_FILE" 2>&1; then
+    log "OpenConnect start command failed."
+    return 1
+  fi
+  if [[ ! -f "$PID_FILE" ]]; then
+    log "OpenConnect did not write pid file."
+    return 1
+  fi
+  return 0
+}
+
+command_connect() {
+  require_root
+  local pid
+  if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
+    log "OpenConnect already running as pid $pid."
+    return 0
+  fi
+
+  local target
+  target="$(resolve_ping_target || true)"
+  if [[ -n "$target" ]] && ping_target_ok "$target"; then
+    log "Connectivity is already OK for $target; not starting a duplicate tunnel."
+    return 0
+  fi
+
+  local json
+  if ! json="$(run_cookie_helper)"; then
+    log "Cookie helper failed."
+    return 1
+  fi
+
+  if start_openconnect_with_cookie "$json"; then
+    return 0
+  fi
+
+  log "First OpenConnect attempt failed; forcing browser relogin and retrying once."
+  if ! json="$(run_cookie_helper --force-login)"; then
+    log "Forced browser relogin failed."
+    return 1
+  fi
+  start_openconnect_with_cookie "$json"
+}
+
+command_disconnect() {
+  require_root
+  signal_tracked_openconnect HUP
+  log "Disconnected tracked OpenConnect with SIGHUP."
+}
+
+command_logout() {
+  require_root
+  signal_tracked_openconnect TERM
+  log "Terminated tracked OpenConnect with SIGTERM."
+}
+
+command_status() {
+  local target ping_status ip any cookie_summary
+  target="$(resolve_ping_target || true)"
+  if [[ -n "$target" ]] && ping_target_ok "$target"; then
+    ping_status="OK ($target)"
+  elif [[ -n "$target" ]]; then
+    ping_status="FAIL ($target)"
+  else
+    ping_status="not checked"
+  fi
+  ip="$(vpn_internal_ip || true)"
+  [[ -n "$ip" ]] || ip="not found"
+  any="$(any_openconnect 2>/dev/null || true)"
+
+  print "Label:        $LABEL"
+  print "Config:       $CONFIG_FILE"
+  print "Tracked:      $(tracked_pid_status)"
+  print "VPN IP:       $ip"
+  print "Ping:         $ping_status"
+  print "OpenConnect processes:"
+  if [[ -n "$any" ]]; then
+    print -r -- "$any" | sed 's/^/  /'
+  else
+    print "  none"
+  fi
+  if [[ -f "$COOKIE_META_FILE" ]]; then
+    cookie_summary="$("$NODE_BIN" -e '
+      const fs = require("fs");
+      const json = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const dsid = (json.cookieExpiries || []).find((cookie) => cookie.name === "DSID");
+      console.log(`${json.ok ? "present" : "missing"}; checked=${json.checkedAt || "unknown"}; DSID expiry ${dsid ? dsid.expiresAt : "unknown"}`);
+    ' "$COOKIE_META_FILE" 2>/dev/null || true)"
+    print "Cookie:       ${cookie_summary:-metadata unreadable}"
+  else
+    print "Cookie:       no metadata"
+  fi
+}
+
+command_doctor() {
+  print "Root:         $(id -u)"
+  print "Label:        $LABEL"
+  print "User:         $USER_NAME ($USER_UID) home=$USER_HOME"
+  print "GUI session:  $(user_gui_available && print available || print missing)"
+  print "Email:        ${UC_DAVIS_EMAIL:-not configured}"
+  print "Node:         ${NODE_BIN:-not found} $([[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] && print OK || print missing)"
+  print "Helper:       ${COOKIE_HELPER:-not configured} $([[ -n "$COOKIE_HELPER" && -f "$COOKIE_HELPER" ]] && print OK || print missing)"
+  print "OpenConnect:  $OPENCONNECT_BIN $([[ -x "$OPENCONNECT_BIN" ]] && print OK || print missing)"
+  print "vpnc-script:  $VPNC_SCRIPT $([[ -x "$VPNC_SCRIPT" ]] && print OK || print missing)"
+  print "Ping target:  $(resolve_ping_target || true)"
+  local keychain_ok=1
+  if [[ "$(id -u)" == "$USER_UID" ]]; then
+    HOME="$USER_HOME" /usr/bin/security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$UC_DAVIS_EMAIL" >/dev/null 2>&1 && keychain_ok=0
+  else
+    /usr/bin/sudo -u "$USER_NAME" HOME="$USER_HOME" /usr/bin/security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$UC_DAVIS_EMAIL" >/dev/null 2>&1 && keychain_ok=0
+  fi
+  if [[ "$keychain_ok" == "0" ]]; then
+    print "Keychain:     OK ($KEYCHAIN_SERVICE / $UC_DAVIS_EMAIL)"
+  else
+    print "Keychain:     missing or not accessible ($KEYCHAIN_SERVICE / $UC_DAVIS_EMAIL)"
+  fi
+}
+
+monitor_once() {
+  local target
+  target="$(resolve_ping_target || true)"
+  if [[ -n "$target" ]] && ping_target_ok "$target"; then
+    log "Connectivity OK: $target"
+    return 0
+  fi
+
+  log "Connectivity failed: ${target:-unresolved target}"
+  [[ "$AUTO_RECONNECT" == "1" ]] || return 1
+
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
+      log "Tracked OpenConnect is running but ping failed; sending SIGHUP before reconnect."
+      signal_tracked_openconnect HUP
+    fi
+  fi
+  command_connect
+}
+
+command_once() {
+  require_root
+  monitor_once
+}
+
+command_run() {
+  require_root
+  log "Starting daemon loop. interval=${CHECK_INTERVAL_SECONDS}s threshold=$FAILURE_THRESHOLD auto=$AUTO_RECONNECT connect_on_start=$CONNECT_ON_START"
+  local failures=0
+  local last_attempt=0
+
+  if [[ "$CONNECT_ON_START" == "1" ]]; then
+    local target
+    target="$(resolve_ping_target || true)"
+    if [[ -z "$target" ]] || ! ping_target_ok "$target"; then
+      log "Startup connectivity check failed; trying connect."
+      command_connect || true
+      last_attempt="$(date +%s)"
+    fi
+  fi
+
+  while true; do
+    local target now
+    target="$(resolve_ping_target || true)"
+    if [[ -n "$target" ]] && ping_target_ok "$target"; then
+      failures=0
+    else
+      failures=$((failures + 1))
+      log "Monitor failure $failures/$FAILURE_THRESHOLD for ${target:-unresolved target}"
+      now="$(date +%s)"
+      if [[ "$AUTO_RECONNECT" == "1" ]] &&
+         (( failures >= FAILURE_THRESHOLD )) &&
+         (( now - last_attempt >= RECONNECT_COOLDOWN_SECONDS )); then
+        monitor_once || true
+        last_attempt="$now"
+        failures=0
+      fi
+    fi
+    sleep "$CHECK_INTERVAL_SECONDS"
+  done
+}
+
+case "$COMMAND" in
+  run) command_run ;;
+  once) command_once ;;
+  status) command_status ;;
+  connect) command_connect ;;
+  disconnect) command_disconnect ;;
+  logout) command_logout ;;
+  doctor) command_doctor ;;
+  help) usage ;;
+esac

@@ -95,12 +95,64 @@ resolve_ping_target() {
   fi
 }
 
+network_service_for_device() {
+  local device="$1"
+  /usr/sbin/networksetup -listallhardwareports 2>/dev/null | awk -v device="$device" '
+    /^Hardware Port:/ {
+      service=$0
+      sub(/^Hardware Port: /, "", service)
+    }
+    /^Device:/ && $2 == device {
+      print service
+      exit
+    }
+  '
+}
+
+router_for_device() {
+  local device="$1"
+  local service
+  service="$(network_service_for_device "$device" || true)"
+  [[ -n "$service" ]] || return 1
+  /usr/sbin/networksetup -getinfo "$service" 2>/dev/null | awk -F': ' '
+    $1 == "Router" && $2 != "" && $2 != "none" {
+      print $2
+      exit
+    }
+  '
+}
+
 default_route_info() {
-  /sbin/route -n get default 2>/dev/null | awk '
+  local fallback_iface="${1:-}"
+  local route_info
+  route_info="$(/sbin/route -n get default 2>/dev/null | awk '
     /gateway:/ { gateway=$2 }
     /interface:/ { iface=$2 }
     END { if (gateway || iface) print gateway "|" iface }
-  '
+  ')"
+  if [[ -n "$route_info" ]]; then
+    print -r -- "$route_info"
+    return 0
+  fi
+
+  local iface="$fallback_iface"
+  if [[ -z "$iface" ]]; then
+    iface="$(/usr/sbin/scutil --nwi 2>/dev/null | awk '
+      /IPv4 network interface information/ { in_ipv4=1; next }
+      /IPv6 network interface information/ { in_ipv4=0 }
+      in_ipv4 && /^[[:space:]]+[[:alnum:]]+[[:space:]]*:/ {
+        gsub(":", "", $1)
+        print $1
+        exit
+      }
+    ')"
+  fi
+  [[ -n "$iface" ]] || return 1
+
+  local router
+  router="$(router_for_device "$iface" || true)"
+  [[ -n "$router" ]] || return 1
+  print -r -- "$router|$iface"
 }
 
 vpn_server_route_info() {
@@ -113,30 +165,41 @@ vpn_server_route_info() {
 }
 
 repair_stale_vpn_server_route() {
-  local server_info default_info
+  local server_info
   server_info="$(vpn_server_route_info || true)"
-  default_info="$(default_route_info || true)"
-  [[ -n "$server_info" && -n "$default_info" ]] || return 0
+  [[ -n "$server_info" ]] || return 0
 
   local -a server_parts default_parts
   server_parts=("${(@ps:|:)server_info}")
-  default_parts=("${(@ps:|:)default_info}")
 
   local server_ip="${server_parts[1]:-}"
   local server_gateway="${server_parts[2]:-}"
   local server_iface="${server_parts[3]:-}"
+  local default_info
+  default_info="$(default_route_info "$server_iface" || true)"
+  [[ -n "$default_info" ]] || return 0
+
+  default_parts=("${(@ps:|:)default_info}")
   local default_gateway="${default_parts[1]:-}"
   local default_iface="${default_parts[2]:-}"
+
+  local -a sudo_cmd
+  sudo_cmd=()
+  if [[ "$USE_SUDO" == "1" ]]; then
+    /usr/bin/sudo -v
+    sudo_cmd=(/usr/bin/sudo)
+  fi
+
+  if ! /sbin/route -n get default >/dev/null 2>&1 && [[ -n "$default_gateway" ]]; then
+    print "Default route is missing; restoring default via $default_gateway on $default_iface."
+    "${sudo_cmd[@]}" /sbin/route -n add default "$default_gateway" >/dev/null 2>&1 ||
+      "${sudo_cmd[@]}" /sbin/route -n change default "$default_gateway" >/dev/null 2>&1 ||
+      true
+  fi
 
   if [[ -n "$server_ip" && -n "$server_gateway" && -n "$default_gateway" &&
         "$server_iface" == "$default_iface" && "$server_gateway" != "$default_gateway" ]]; then
     print "VPN server route looks stale: $server_ip via $server_gateway on $server_iface; default is $default_gateway."
-    local -a sudo_cmd
-    sudo_cmd=()
-    if [[ "$USE_SUDO" == "1" ]]; then
-      /usr/bin/sudo -v
-      sudo_cmd=(/usr/bin/sudo)
-    fi
     "${sudo_cmd[@]}" /sbin/route -n delete "$server_ip" >/dev/null 2>&1 || true
   fi
 }
@@ -228,10 +291,10 @@ command_status() {
 
   local server_info default_info server_route_status=""
   server_info="$(vpn_server_route_info || true)"
-  default_info="$(default_route_info || true)"
   if [[ -n "$server_info" ]]; then
     local -a server_parts default_parts
     server_parts=("${(@ps:|:)server_info}")
+    default_info="$(default_route_info "${server_parts[3]:-}" || true)"
     default_parts=("${(@ps:|:)default_info}")
     if [[ -n "${default_parts[1]:-}" && "${server_parts[3]:-}" == "${default_parts[2]:-}" &&
           -n "${server_parts[2]:-}" && "${server_parts[2]:-}" != "${default_parts[1]:-}" ]]; then

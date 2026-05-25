@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="${0:A:h}"
 LABEL="local.ucdavis-openconnect-daemon"
+LEGACY_LABELS=(com.weyl.ucdavis-openconnect-daemon)
 PLIST_TEMPLATE="$ROOT_DIR/local.ucdavis-openconnect-daemon.plist"
 INSTALL_BIN="/usr/local/sbin/ucdavis-vpn-root-daemon"
 INSTALL_DIR="/Library/Application Support/ucdavis-vpn-daemon"
@@ -23,6 +24,19 @@ shell_escape_sed() {
   printf '%s' "$1" | /usr/bin/sed 's/[\/&]/\\&/g'
 }
 
+remove_legacy_launchdaemons() {
+  local legacy_label legacy_plist
+  for legacy_label in "${LEGACY_LABELS[@]}"; do
+    legacy_plist="/Library/LaunchDaemons/$legacy_label.plist"
+    /bin/launchctl bootout "system/$legacy_label" >/dev/null 2>&1 || true
+    if [[ -f "$legacy_plist" ]]; then
+      /bin/launchctl bootout system "$legacy_plist" >/dev/null 2>&1 || true
+      rm -f "$legacy_plist"
+      print "Removed legacy LaunchDaemon: $legacy_plist"
+    fi
+  done
+}
+
 console_user="${SUDO_USER:-$(/usr/bin/stat -f %Su /dev/console 2>/dev/null)}"
 [[ "$console_user" == "root" || -z "$console_user" ]] && console_user="$(/usr/bin/stat -f %Su /dev/console 2>/dev/null)"
 console_uid="$(/usr/bin/id -u "$console_user")"
@@ -30,6 +44,7 @@ console_home="$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory | 
 project_root="${ROOT_DIR:h}"
 
 mkdir -p /usr/local/sbin "$INSTALL_DIR" "$LOG_DIR" "$DB_DIR" "$STATE_DIR"
+remove_legacy_launchdaemons
 
 if [[ ! -f "$PLIST_TEMPLATE" ]]; then
   print -u2 "Missing plist template: $PLIST_TEMPLATE"

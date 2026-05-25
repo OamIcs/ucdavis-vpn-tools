@@ -67,6 +67,9 @@ The installer writes:
 /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
 ```
 
+The installer also removes the old legacy LaunchDaemon label
+`com.weyl.ucdavis-openconnect-daemon` if it is present.
+
 Start immediately during install:
 
 ```zsh

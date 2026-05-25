@@ -4,6 +4,7 @@ set -euo pipefail
 LABEL="local.ucdavis-openconnect-daemon"
 LEGACY_LABELS=(com.weyl.ucdavis-openconnect-daemon)
 INSTALL_BIN="/usr/local/sbin/ucdavis-vpn-root-daemon"
+INSTALL_CTL="/usr/local/bin/ucdavis-vpnctl"
 PLIST_FILE="/Library/LaunchDaemons/$LABEL.plist"
 
 if [[ "$(id -u)" != "0" ]]; then
@@ -22,7 +23,7 @@ for legacy_label in "${LEGACY_LABELS[@]}"; do
   rm -f "$legacy_plist"
 done
 
-rm -f "$INSTALL_BIN"
+rm -f "$INSTALL_BIN" "$INSTALL_CTL"
 
 print "Removed LaunchDaemon and binary."
 print "Left config/log/state directories in place:"

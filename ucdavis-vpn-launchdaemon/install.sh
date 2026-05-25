@@ -6,6 +6,7 @@ LABEL="local.ucdavis-openconnect-daemon"
 LEGACY_LABELS=(com.weyl.ucdavis-openconnect-daemon)
 PLIST_TEMPLATE="$ROOT_DIR/local.ucdavis-openconnect-daemon.plist"
 INSTALL_BIN="/usr/local/sbin/ucdavis-vpn-root-daemon"
+INSTALL_CTL="/usr/local/bin/ucdavis-vpnctl"
 INSTALL_DIR="/Library/Application Support/ucdavis-vpn-daemon"
 CONFIG_FILE="$INSTALL_DIR/config.env"
 PLIST_FILE="/Library/LaunchDaemons/$LABEL.plist"
@@ -52,7 +53,7 @@ console_uid="$(/usr/bin/id -u "$console_user")"
 console_home="$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory | /usr/bin/awk '{print $2}')"
 project_root="${ROOT_DIR:h}"
 
-mkdir -p /usr/local/sbin "$INSTALL_DIR" "$LOG_DIR" "$DB_DIR" "$STATE_DIR"
+mkdir -p /usr/local/sbin /usr/local/bin "$INSTALL_DIR" "$LOG_DIR" "$DB_DIR" "$STATE_DIR"
 remove_legacy_launchdaemons
 
 if [[ ! -f "$PLIST_TEMPLATE" ]]; then
@@ -61,6 +62,7 @@ if [[ ! -f "$PLIST_TEMPLATE" ]]; then
 fi
 
 install -m 0755 "$ROOT_DIR/bin/ucdavis-vpn-root-daemon" "$INSTALL_BIN"
+install -m 0755 "$ROOT_DIR/bin/ucdavis-vpnctl" "$INSTALL_CTL"
 
 if [[ -f "$CONFIG_FILE" ]]; then
   backup="$CONFIG_FILE.backup.$(/bin/date +%Y%m%d-%H%M%S)"
@@ -83,20 +85,23 @@ fi
 ensure_config_default GUI_SESSION_WAIT_SECONDS 0
 ensure_config_default GUI_SESSION_POLL_SECONDS 1
 ensure_config_default MAX_BROWSER_SESSION_ATTEMPTS 2
+ensure_config_default CONTROL_POLL_SECONDS 1
 if /usr/bin/grep -q '^MAX_BROWSER_SESSION_ATTEMPTS=3$' "$CONFIG_FILE"; then
   /usr/bin/sed -i '' 's/^MAX_BROWSER_SESSION_ATTEMPTS=3$/MAX_BROWSER_SESSION_ATTEMPTS=2/' "$CONFIG_FILE"
   print "Updated default config: MAX_BROWSER_SESSION_ATTEMPTS=2"
 fi
 
 install -m 0644 "$PLIST_TEMPLATE" "$PLIST_FILE"
-chown root:wheel "$INSTALL_BIN" "$PLIST_FILE"
+chown root:wheel "$INSTALL_BIN" "$INSTALL_CTL" "$PLIST_FILE"
 chmod 0755 "$INSTALL_BIN"
+chmod 0755 "$INSTALL_CTL"
 chmod 0644 "$PLIST_FILE"
 
 /usr/bin/plutil -lint "$PLIST_FILE"
 
 print "Installed:"
 print "  $INSTALL_BIN"
+print "  $INSTALL_CTL"
 print "  $CONFIG_FILE"
 print "  $PLIST_FILE"
 

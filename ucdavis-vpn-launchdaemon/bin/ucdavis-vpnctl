@@ -1,0 +1,135 @@
+#!/bin/zsh
+set -euo pipefail
+
+CONFIG_FILE="/Library/Application Support/ucdavis-vpn-daemon/config.env"
+COMMAND="status"
+PROGRAM_NAME="${0:t}"
+
+while (( $# > 0 )); do
+  case "$1" in
+    --config)
+      CONFIG_FILE="$2"
+      shift 2
+      ;;
+    -h|--help|help)
+      COMMAND="help"
+      shift
+      ;;
+    *)
+      COMMAND="$1"
+      shift
+      break
+      ;;
+  esac
+done
+
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+STATE_DIR="${STATE_DIR:-/var/run/ucdavis-openconnect-daemon}"
+CONTROL_DIR="${CONTROL_DIR:-$STATE_DIR/control}"
+CONTROL_RESPONSE_DIR="${CONTROL_RESPONSE_DIR:-$STATE_DIR/control/responses}"
+ROOT_DAEMON_BIN="${ROOT_DAEMON_BIN:-/usr/local/sbin/ucdavis-vpn-root-daemon}"
+if [[ ! -x "$ROOT_DAEMON_BIN" && -x "${0:A:h}/ucdavis-vpn-root-daemon" ]]; then
+  ROOT_DAEMON_BIN="${0:A:h}/ucdavis-vpn-root-daemon"
+fi
+
+usage() {
+  cat <<EOF
+Usage: $PROGRAM_NAME [--config path] <command>
+
+No-sudo commands:
+  status       Print VPN status.
+  doctor       Print dependency and config checks.
+  connect      Clear retry block and connect now.
+  disconnect   Disconnect the tunnel, leaving auto reconnect enabled.
+  pause        Pause automatic reconnect.
+  resume       Resume automatic reconnect.
+  off|disable  Pause automatic reconnect and disconnect.
+  on|enable    Resume automatic reconnect and connect now.
+  once         Ask the daemon to run one monitor pass.
+
+Config:
+  $CONFIG_FILE
+EOF
+}
+
+request_timeout_seconds() {
+  case "$1" in
+    connect|enable|on|once) print 240 ;;
+    *) print 30 ;;
+  esac
+}
+
+response_output() {
+  /usr/bin/awk '
+    $0 == "output<<EOF" { in_output=1; next }
+    $0 == "EOF" { in_output=0; next }
+    in_output { print }
+  ' "$1"
+}
+
+response_exit() {
+  /usr/bin/awk -F= '$1 == "exit" { print $2; exit }' "$1"
+}
+
+send_control_request() {
+  local command="$1"
+  local id request tmp response waited timeout code output
+  [[ -d "$CONTROL_DIR" && -w "$CONTROL_DIR" ]] || {
+    print -u2 "Control channel is not writable: $CONTROL_DIR"
+    print -u2 "Install/reload the LaunchDaemon first:"
+    print -u2 "  cd ucdavis-vpn-launchdaemon && sudo ./install.sh"
+    return 1
+  }
+
+  id="$(/bin/date +%s).$$.$RANDOM"
+  request="$CONTROL_DIR/$id.request"
+  tmp="$request.tmp"
+  response="$CONTROL_RESPONSE_DIR/$id.response"
+  {
+    print "command=$command"
+    print "created_at=$(/bin/date +%Y-%m-%dT%H:%M:%S%z)"
+  } > "$tmp"
+  chmod 0600 "$tmp" >/dev/null 2>&1 || true
+  mv "$tmp" "$request"
+
+  timeout="$(request_timeout_seconds "$command")"
+  waited=0
+  while (( waited < timeout )); do
+    if [[ -f "$response" ]]; then
+      code="$(response_exit "$response")"
+      output="$(response_output "$response")"
+      rm -f "$response"
+      [[ -n "$output" ]] && print -r -- "$output"
+      return "${code:-1}"
+    fi
+    sleep 1
+    waited=$(( waited + 1 ))
+  done
+
+  print -u2 "Timed out waiting for daemon response to: $command"
+  return 124
+}
+
+case "$COMMAND" in
+  help)
+    usage
+    ;;
+  status|doctor)
+    "$ROOT_DAEMON_BIN" --config "$CONFIG_FILE" "$COMMAND"
+    ;;
+  connect|disconnect|pause|resume|once)
+    send_control_request "$COMMAND"
+    ;;
+  off|disable)
+    send_control_request disable
+    ;;
+  on|enable)
+    send_control_request enable
+    ;;
+  *)
+    print -u2 "Unknown command: $COMMAND"
+    usage >&2
+    exit 2
+    ;;
+esac

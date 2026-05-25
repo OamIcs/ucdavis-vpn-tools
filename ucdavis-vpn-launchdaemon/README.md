@@ -63,6 +63,7 @@ The installer writes:
 
 ```zsh
 /usr/local/sbin/ucdavis-vpn-root-daemon
+/usr/local/bin/ucdavis-vpnctl
 /Library/Application Support/ucdavis-vpn-daemon/config.env
 /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
 ```
@@ -96,6 +97,7 @@ RECONNECT_COOLDOWN_SECONDS=180
 GUI_SESSION_WAIT_SECONDS=0
 GUI_SESSION_POLL_SECONDS=1
 MAX_BROWSER_SESSION_ATTEMPTS=2
+CONTROL_POLL_SECONDS=1
 AUTO_RECONNECT=1
 CONNECT_ON_START=1
 ```
@@ -124,6 +126,22 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/local.ucdavis-openconnect
 
 ## Commands
 
+Normal no-sudo control:
+
+```zsh
+ucdavis-vpnctl status
+ucdavis-vpnctl doctor
+ucdavis-vpnctl connect
+ucdavis-vpnctl disconnect
+ucdavis-vpnctl off
+ucdavis-vpnctl on
+```
+
+The user CLI sends privileged actions through the running root LaunchDaemon's
+control channel. It does not need sudo after installation.
+
+Root daemon commands:
+
 ```zsh
 sudo /usr/local/sbin/ucdavis-vpn-root-daemon doctor
 sudo /usr/local/sbin/ucdavis-vpn-root-daemon status
@@ -137,17 +155,16 @@ Quick VPN controls:
 
 ```zsh
 # Connect or reconnect now.
-sudo /usr/local/sbin/ucdavis-vpn-root-daemon connect
+ucdavis-vpnctl connect
 
-# Disconnect the tunnel but keep the browser/web session for reuse.
-sudo /usr/local/sbin/ucdavis-vpn-root-daemon disconnect
+# Disconnect the tunnel but leave automatic reconnect enabled.
+ucdavis-vpnctl disconnect
 
-# Fully stop the auto daemon and disconnect the tunnel.
-sudo launchctl bootout system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist 2>/dev/null || true
-sudo /usr/local/sbin/ucdavis-vpn-root-daemon disconnect
+# Pause automatic reconnect and disconnect the tunnel.
+ucdavis-vpnctl off
 
-# Re-enable auto start/reconnect.
-sudo launchctl bootstrap system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
+# Resume automatic reconnect and connect now.
+ucdavis-vpnctl on
 ```
 
 LaunchDaemon control:
@@ -166,10 +183,20 @@ tail -f /var/log/ucdavis-openconnect-daemon/openconnect.log
 tail -f /var/log/ucdavis-openconnect-daemon/launchd.err.log
 ```
 
+## Tests
+
+The unit tests run without sudo and use temporary state/config directories:
+
+```zsh
+ucdavis-vpn-launchdaemon/test/run-unit-tests.zsh
+```
+
 ## Security Notes
 
 - The daemon runs as root.
 - The browser helper runs as the configured user with `launchctl asuser`.
+- The no-sudo `ucdavis-vpnctl` command can only talk to the root daemon through a
+  per-user control directory owned by the configured console user.
 - Chrome uses a dedicated profile and local DevTools port.
 - Do not commit `/Library/Application Support/ucdavis-vpn-daemon/config.env`.
 - Do not commit cookies, logs, pid files, or Keychain exports.

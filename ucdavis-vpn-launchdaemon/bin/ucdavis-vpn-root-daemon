@@ -11,7 +11,7 @@ while (( $# > 0 )); do
       CONFIG_FILE="$2"
       shift 2
       ;;
-    run|once|status|connect|disconnect|logout|doctor)
+    run|once|status|connect|disconnect|logout|doctor|pause|resume|disable|enable)
       COMMAND="$1"
       shift
       ;;
@@ -67,6 +67,12 @@ COOKIE_META_FILE="${COOKIE_META_FILE:-$DB_DIR/cookie-meta.json}"
 RUN_LOCK_DIR="${RUN_LOCK_DIR:-$DB_DIR/run.lock}"
 BROWSER_SESSION_ATTEMPTS_FILE="${BROWSER_SESSION_ATTEMPTS_FILE:-$STATE_DIR/browser-session-attempts}"
 BROWSER_SESSION_BLOCK_FILE="${BROWSER_SESSION_BLOCK_FILE:-$STATE_DIR/browser-session.blocked}"
+AUTO_RECONNECT_PAUSE_FILE="${AUTO_RECONNECT_PAUSE_FILE:-$STATE_DIR/auto-reconnect.paused}"
+CONTROL_DIR="${CONTROL_DIR:-$STATE_DIR/control}"
+CONTROL_RESPONSE_DIR="${CONTROL_RESPONSE_DIR:-$STATE_DIR/control/responses}"
+CONTROL_POLL_SECONDS="${CONTROL_POLL_SECONDS:-1}"
+[[ "$CONTROL_POLL_SECONDS" == <-> ]] || CONTROL_POLL_SECONDS=1
+(( CONTROL_POLL_SECONDS > 0 )) || CONTROL_POLL_SECONDS=1
 DAEMON_LOG_FILE="${DAEMON_LOG_FILE:-$LOG_DIR/daemon.log}"
 OPENCONNECT_LOG_FILE="${OPENCONNECT_LOG_FILE:-$LOG_DIR/openconnect.log}"
 
@@ -124,6 +130,10 @@ Commands:
   connect      Connect now, using or refreshing the browser cookie.
   disconnect   Send SIGHUP to OpenConnect, preserving the web login session.
   logout       Send SIGTERM to OpenConnect, logging out the VPN session.
+  pause        Pause automatic reconnect.
+  resume       Resume automatic reconnect.
+  disable      Pause automatic reconnect and disconnect the tunnel.
+  enable       Resume automatic reconnect and connect now.
   doctor       Check dependencies and root/user context.
 
 Config:
@@ -352,6 +362,44 @@ user_gui_available() {
   /bin/launchctl print "gui/$USER_UID" >/dev/null 2>&1
 }
 
+setup_control_dir() {
+  require_root
+  mkdir -p "$CONTROL_DIR" "$CONTROL_RESPONSE_DIR"
+  chown "$USER_NAME" "$CONTROL_DIR" "$CONTROL_RESPONSE_DIR" >/dev/null 2>&1 || true
+  chmod 0700 "$CONTROL_DIR" "$CONTROL_RESPONSE_DIR" >/dev/null 2>&1 || true
+}
+
+auto_reconnect_paused() {
+  [[ -f "$AUTO_RECONNECT_PAUSE_FILE" ]]
+}
+
+set_auto_reconnect_paused() {
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  {
+    print "paused_at=$(timestamp)"
+    print "reason=${1:-manual pause}"
+  } > "$AUTO_RECONNECT_PAUSE_FILE"
+  log "Automatic reconnect paused: ${1:-manual pause}."
+}
+
+clear_auto_reconnect_paused() {
+  local reason="${1:-manual resume}"
+  if [[ -f "$AUTO_RECONNECT_PAUSE_FILE" ]]; then
+    rm -f "$AUTO_RECONNECT_PAUSE_FILE"
+    log "Automatic reconnect resumed: $reason."
+  fi
+}
+
+auto_reconnect_status() {
+  local reason
+  if auto_reconnect_paused; then
+    reason="$(/usr/bin/awk -F= '$1 == "reason" { print $2; exit }' "$AUTO_RECONNECT_PAUSE_FILE" 2>/dev/null || true)"
+    print "paused${reason:+ ($reason)}"
+  else
+    print "$([[ "$AUTO_RECONNECT" == "1" ]] && print active || print disabled)"
+  fi
+}
+
 browser_session_attempt_count() {
   local count=0
   if [[ -f "$BROWSER_SESSION_ATTEMPTS_FILE" ]]; then
@@ -443,6 +491,106 @@ browser_session_budget_status() {
   else
     print "$count/$MAX_BROWSER_SESSION_ATTEMPTS"
   fi
+}
+
+control_request_field() {
+  local file="$1"
+  local key="$2"
+  /usr/bin/awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2); exit }' "$file" 2>/dev/null
+}
+
+write_control_response() {
+  local id="$1"
+  local code="$2"
+  local output="$3"
+  local tmp="$CONTROL_RESPONSE_DIR/$id.response.tmp.$$"
+  local response="$CONTROL_RESPONSE_DIR/$id.response"
+  {
+    print "exit=$code"
+    print "output<<EOF"
+    print -r -- "$output"
+    print "EOF"
+  } > "$tmp"
+  chown "$USER_NAME" "$tmp" >/dev/null 2>&1 || true
+  chmod 0600 "$tmp" >/dev/null 2>&1 || true
+  mv "$tmp" "$response"
+}
+
+handle_control_command() {
+  local command="$1"
+  local old_command rc
+  case "$command" in
+    status)
+      command_status
+      ;;
+    connect)
+      clear_auto_reconnect_paused "manual connect"
+      old_command="$COMMAND"
+      COMMAND=connect
+      command_connect
+      rc=$?
+      COMMAND="$old_command"
+      return "$rc"
+      ;;
+    disconnect)
+      command_disconnect
+      ;;
+    pause)
+      command_pause
+      ;;
+    resume)
+      command_resume
+      ;;
+    disable|off)
+      command_disable
+      ;;
+    enable|on)
+      command_enable
+      ;;
+    once)
+      monitor_once
+      ;;
+    *)
+      print -u2 "Unsupported control command: $command"
+      return 2
+      ;;
+  esac
+}
+
+process_control_requests() {
+  emulate -L zsh
+  setopt null_glob
+  local request owner id command output rc
+  for request in "$CONTROL_DIR"/*.request; do
+    [[ -f "$request" ]] || continue
+    owner="$(/usr/bin/stat -f %u "$request" 2>/dev/null || true)"
+    if [[ -n "$USER_UID" && "$owner" != "$USER_UID" ]]; then
+      log "Ignoring control request not owned by uid $USER_UID: $request"
+      rm -f "$request"
+      continue
+    fi
+    id="${request:t:r}"
+    command="$(control_request_field "$request" command)"
+    rm -f "$request"
+    if output="$(handle_control_command "$command" 2>&1)"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    write_control_response "$id" "$rc" "$output"
+  done
+}
+
+sleep_with_control() {
+  local remaining="$1"
+  local slice
+  while (( remaining > 0 )); do
+    process_control_requests
+    slice="$CONTROL_POLL_SECONDS"
+    (( slice > remaining )) && slice="$remaining"
+    sleep "$slice"
+    remaining=$(( remaining - slice ))
+  done
 }
 
 wait_for_user_gui() {
@@ -708,6 +856,35 @@ command_logout() {
   log "Terminated tracked OpenConnect with SIGTERM."
 }
 
+command_pause() {
+  require_root
+  set_auto_reconnect_paused "manual pause"
+}
+
+command_resume() {
+  require_root
+  clear_auto_reconnect_paused "manual resume"
+}
+
+command_disable() {
+  require_root
+  set_auto_reconnect_paused "manual disable"
+  signal_tracked_openconnect HUP
+  log "Disabled automatic reconnect and disconnected tracked OpenConnect."
+}
+
+command_enable() {
+  require_root
+  local old_command rc
+  clear_auto_reconnect_paused "manual enable"
+  old_command="$COMMAND"
+  COMMAND=connect
+  command_connect
+  rc=$?
+  COMMAND="$old_command"
+  return "$rc"
+}
+
 command_status() {
   local target ping_status ip any cookie_summary
   target="$(resolve_ping_target || true)"
@@ -739,6 +916,7 @@ command_status() {
   print "Tracked:      $(tracked_pid_status)"
   print "VPN IP:       $ip"
   print "Ping:         $ping_status"
+  print "Auto:         $(auto_reconnect_status)"
   print "Browser tries: $(browser_session_budget_status)"
   [[ -n "$server_info" ]] && print "VPN gateway:  ${server_parts[1]:-unknown} via ${server_parts[2]:-unknown} on ${server_parts[3]:-unknown}${server_route_status}"
   print "OpenConnect processes:"
@@ -771,6 +949,7 @@ command_doctor() {
   print "OpenConnect:  $OPENCONNECT_BIN $([[ -x "$OPENCONNECT_BIN" ]] && print OK || print missing)"
   print "vpnc-script:  $VPNC_SCRIPT $([[ -x "$VPNC_SCRIPT" ]] && print OK || print missing)"
   print "Ping target:  $(resolve_ping_target || true)"
+  print "Auto:         $(auto_reconnect_status)"
   print "Browser tries: $(browser_session_budget_status)"
   local keychain_ok=1
   if [[ "$(id -u)" == "$USER_UID" ]]; then
@@ -796,6 +975,10 @@ monitor_once() {
 
   log "Connectivity failed: ${target:-unresolved target}"
   [[ "$AUTO_RECONNECT" == "1" ]] || return 1
+  if auto_reconnect_paused; then
+    log "Auto reconnect is paused; skipping reconnect."
+    return 0
+  fi
   if browser_session_blocked; then
     log "Auto reconnect is paused by the browser session attempt limit; run '$PROGRAM_NAME connect' after manual recovery."
     return "$BROWSER_SESSION_BLOCK_RC"
@@ -819,13 +1002,16 @@ command_once() {
 command_run() {
   require_root
   acquire_run_lock
+  setup_control_dir
   log "Starting daemon loop. interval=${CHECK_INTERVAL_SECONDS}s threshold=$FAILURE_THRESHOLD auto=$AUTO_RECONNECT connect_on_start=$CONNECT_ON_START"
   local failures=0
   local last_attempt=0
   local rc=0
   local blocked_logged=0
 
-  if [[ "$CONNECT_ON_START" == "1" ]]; then
+  process_control_requests
+
+  if [[ "$CONNECT_ON_START" == "1" && ! -f "$AUTO_RECONNECT_PAUSE_FILE" ]]; then
     local target
     target="$(resolve_ping_target || true)"
     if [[ -z "$target" ]] || ! ping_target_ok "$target"; then
@@ -847,18 +1033,23 @@ command_run() {
 
   while true; do
     local target now
+    process_control_requests
     target="$(resolve_ping_target || true)"
     if [[ -n "$target" ]] && ping_target_ok "$target"; then
       failures=0
       blocked_logged=0
       reset_browser_session_attempts "connectivity OK"
     else
+      if auto_reconnect_paused; then
+        sleep_with_control "$CHECK_INTERVAL_SECONDS"
+        continue
+      fi
       if browser_session_blocked; then
         if (( blocked_logged == 0 )); then
           log "Auto reconnect is paused by the browser session attempt limit; run '$PROGRAM_NAME connect' after manual recovery."
           blocked_logged=1
         fi
-        sleep "$CHECK_INTERVAL_SECONDS"
+        sleep_with_control "$CHECK_INTERVAL_SECONDS"
         continue
       fi
       blocked_logged=0
@@ -884,9 +1075,13 @@ command_run() {
         fi
       fi
     fi
-    sleep "$CHECK_INTERVAL_SECONDS"
+    sleep_with_control "$CHECK_INTERVAL_SECONDS"
   done
 }
+
+if [[ "${UC_DAVIS_VPN_DAEMON_SOURCE_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 case "$COMMAND" in
   run) command_run ;;
@@ -895,6 +1090,10 @@ case "$COMMAND" in
   connect) command_connect ;;
   disconnect) command_disconnect ;;
   logout) command_logout ;;
+  pause) command_pause ;;
+  resume) command_resume ;;
+  disable) command_disable ;;
+  enable) command_enable ;;
   doctor) command_doctor ;;
   help) usage ;;
 esac

@@ -95,6 +95,7 @@ FAILURE_THRESHOLD=2
 RECONNECT_COOLDOWN_SECONDS=180
 GUI_SESSION_WAIT_SECONDS=0
 GUI_SESSION_POLL_SECONDS=1
+MAX_BROWSER_SESSION_ATTEMPTS=2
 AUTO_RECONNECT=1
 CONNECT_ON_START=1
 ```
@@ -104,6 +105,15 @@ When the daemon starts before the desktop GUI is ready after boot,
 `GUI_SESSION_WAIT_SECONDS=0` means it keeps polling the user's GUI session until
 it is available, then immediately starts the browser login helper. Set a positive
 number to use a bounded wait instead.
+`MAX_BROWSER_SESSION_ATTEMPTS=2` stops automatic browser session acquisition
+after two attempts while the VPN is still not verified by the ping monitor.
+The attempt state is stored under `/var/run`, so it resets after reboot. After
+fixing the network or logging in manually, a manual `connect` also clears the
+block and starts a fresh attempt:
+
+```zsh
+sudo /usr/local/sbin/ucdavis-vpn-root-daemon connect
+```
 
 After editing config:
 
@@ -121,6 +131,23 @@ sudo /usr/local/sbin/ucdavis-vpn-root-daemon once
 sudo /usr/local/sbin/ucdavis-vpn-root-daemon connect
 sudo /usr/local/sbin/ucdavis-vpn-root-daemon disconnect
 sudo /usr/local/sbin/ucdavis-vpn-root-daemon logout
+```
+
+Quick VPN controls:
+
+```zsh
+# Connect or reconnect now.
+sudo /usr/local/sbin/ucdavis-vpn-root-daemon connect
+
+# Disconnect the tunnel but keep the browser/web session for reuse.
+sudo /usr/local/sbin/ucdavis-vpn-root-daemon disconnect
+
+# Fully stop the auto daemon and disconnect the tunnel.
+sudo launchctl bootout system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist 2>/dev/null || true
+sudo /usr/local/sbin/ucdavis-vpn-root-daemon disconnect
+
+# Re-enable auto start/reconnect.
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
 ```
 
 LaunchDaemon control:

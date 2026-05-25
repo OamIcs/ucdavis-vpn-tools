@@ -56,6 +56,8 @@ GUI_SESSION_WAIT_SECONDS="${GUI_SESSION_WAIT_SECONDS:-0}"
 GUI_SESSION_POLL_SECONDS="${GUI_SESSION_POLL_SECONDS:-1}"
 AUTO_RECONNECT="${AUTO_RECONNECT:-1}"
 CONNECT_ON_START="${CONNECT_ON_START:-1}"
+MAX_BROWSER_SESSION_ATTEMPTS="${MAX_BROWSER_SESSION_ATTEMPTS:-2}"
+[[ "$MAX_BROWSER_SESSION_ATTEMPTS" == <-> ]] || MAX_BROWSER_SESSION_ATTEMPTS=2
 
 STATE_DIR="${STATE_DIR:-/var/run/ucdavis-openconnect-daemon}"
 DB_DIR="${DB_DIR:-/var/db/ucdavis-openconnect-daemon}"
@@ -63,6 +65,8 @@ LOG_DIR="${LOG_DIR:-/var/log/ucdavis-openconnect-daemon}"
 PID_FILE="${PID_FILE:-$STATE_DIR/openconnect.pid}"
 COOKIE_META_FILE="${COOKIE_META_FILE:-$DB_DIR/cookie-meta.json}"
 RUN_LOCK_DIR="${RUN_LOCK_DIR:-$DB_DIR/run.lock}"
+BROWSER_SESSION_ATTEMPTS_FILE="${BROWSER_SESSION_ATTEMPTS_FILE:-$STATE_DIR/browser-session-attempts}"
+BROWSER_SESSION_BLOCK_FILE="${BROWSER_SESSION_BLOCK_FILE:-$STATE_DIR/browser-session.blocked}"
 DAEMON_LOG_FILE="${DAEMON_LOG_FILE:-$LOG_DIR/daemon.log}"
 OPENCONNECT_LOG_FILE="${OPENCONNECT_LOG_FILE:-$LOG_DIR/openconnect.log}"
 
@@ -79,6 +83,7 @@ CHROME_APP="${CHROME_APP:-Google Chrome}"
 CLOSE_WINDOW_AFTER_COOKIE="${CLOSE_WINDOW_AFTER_COOKIE:-1}"
 
 RETRY_WITHOUT_COOLDOWN_RC=75
+BROWSER_SESSION_BLOCK_RC=76
 
 mkdir -p "$STATE_DIR" "$DB_DIR" "$LOG_DIR" 2>/dev/null || true
 
@@ -347,6 +352,99 @@ user_gui_available() {
   /bin/launchctl print "gui/$USER_UID" >/dev/null 2>&1
 }
 
+browser_session_attempt_count() {
+  local count=0
+  if [[ -f "$BROWSER_SESSION_ATTEMPTS_FILE" ]]; then
+    count="$(<"$BROWSER_SESSION_ATTEMPTS_FILE")"
+  fi
+  [[ "$count" == <-> ]] || count=0
+  print -r -- "$count"
+}
+
+browser_session_blocked() {
+  (( MAX_BROWSER_SESSION_ATTEMPTS > 0 )) && [[ -f "$BROWSER_SESSION_BLOCK_FILE" ]]
+}
+
+browser_session_budget_exhausted() {
+  (( MAX_BROWSER_SESSION_ATTEMPTS > 0 )) &&
+    (( $(browser_session_attempt_count) >= MAX_BROWSER_SESSION_ATTEMPTS ))
+}
+
+block_browser_session_attempts() {
+  local count reason
+  count="$(browser_session_attempt_count)"
+  reason="${1:-browser session attempt limit reached}"
+  {
+    print "blocked_at=$(timestamp)"
+    print "attempts=$count"
+    print "max=$MAX_BROWSER_SESSION_ATTEMPTS"
+    print "reason=$reason"
+  } > "$BROWSER_SESSION_BLOCK_FILE"
+  log "Browser session attempts are blocked after $count/$MAX_BROWSER_SESSION_ATTEMPTS attempts; run '$PROGRAM_NAME connect' after manual recovery."
+}
+
+block_browser_session_attempts_if_exhausted() {
+  local reason="${1:-browser session attempt limit reached}"
+  if ! browser_session_blocked && browser_session_budget_exhausted; then
+    block_browser_session_attempts "$reason"
+    return "$BROWSER_SESSION_BLOCK_RC"
+  fi
+  browser_session_blocked && return "$BROWSER_SESSION_BLOCK_RC"
+  return 0
+}
+
+reset_browser_session_attempts() {
+  local reason="${1:-manual connect}"
+  if [[ -f "$BROWSER_SESSION_ATTEMPTS_FILE" || -f "$BROWSER_SESSION_BLOCK_FILE" ]]; then
+    rm -f "$BROWSER_SESSION_ATTEMPTS_FILE" "$BROWSER_SESSION_BLOCK_FILE"
+    log "Reset browser session attempt state: $reason."
+  fi
+  return 0
+}
+
+record_browser_session_attempt() {
+  local mode="$1"
+  local count next
+  (( MAX_BROWSER_SESSION_ATTEMPTS > 0 )) || return 0
+  if browser_session_blocked; then
+    log "Browser session attempts are currently blocked; run '$PROGRAM_NAME connect' after manual recovery."
+    return "$BROWSER_SESSION_BLOCK_RC"
+  fi
+  count="$(browser_session_attempt_count)"
+  if (( count >= MAX_BROWSER_SESSION_ATTEMPTS )); then
+    block_browser_session_attempts "attempt limit reached before $mode"
+    return "$BROWSER_SESSION_BLOCK_RC"
+  fi
+  next=$(( count + 1 ))
+  print -r -- "$next" > "$BROWSER_SESSION_ATTEMPTS_FILE"
+  log "Browser session attempt $next/$MAX_BROWSER_SESSION_ATTEMPTS ($mode)."
+  if (( next >= MAX_BROWSER_SESSION_ATTEMPTS )); then
+    log "This is the last automatic browser session attempt before manual connect is required."
+  fi
+  return 0
+}
+
+browser_session_budget_status() {
+  local count block_summary
+  count="$(browser_session_attempt_count)"
+  if (( MAX_BROWSER_SESSION_ATTEMPTS <= 0 )); then
+    print "unlimited"
+    return 0
+  fi
+  if browser_session_blocked; then
+    block_summary="$(/usr/bin/awk -F= '
+      $1 == "blocked_at" { blocked_at=$2 }
+      $1 == "reason" { reason=$2 }
+      END {
+        if (blocked_at || reason) print "blocked since " blocked_at (reason ? "; " reason : "")
+      }
+    ' "$BROWSER_SESSION_BLOCK_FILE" 2>/dev/null || true)"
+    print "blocked ($count/$MAX_BROWSER_SESSION_ATTEMPTS${block_summary:+; $block_summary})"
+  else
+    print "$count/$MAX_BROWSER_SESSION_ATTEMPTS"
+  fi
+}
+
 wait_for_user_gui() {
   local start now elapsed
   user_gui_available && return 0
@@ -396,6 +494,14 @@ run_cookie_helper() {
   [[ -f "$COOKIE_HELPER" ]] || {
     log "Cookie helper missing: $COOKIE_HELPER"
     return 1
+  }
+
+  local mode="reuse existing session"
+  [[ " $* " == *" --force-login "* ]] && mode="force browser login"
+  local attempt_rc
+  record_browser_session_attempt "$mode" || {
+    attempt_rc=$?
+    return "$attempt_rc"
   }
 
   /bin/launchctl asuser "$USER_UID" /usr/bin/sudo -u "$USER_NAME" \
@@ -522,17 +628,30 @@ start_openconnect_with_cookie() {
 
 command_connect() {
   require_root
+  if [[ "$COMMAND" == "connect" ]]; then
+    reset_browser_session_attempts "manual connect"
+  fi
   local pid
   if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
     local target
     target="$(resolve_ping_target || true)"
     if [[ -n "$target" ]] && ping_target_ok "$target"; then
+      reset_browser_session_attempts "connectivity OK"
       log "OpenConnect already running as pid $pid."
       return 0
+    fi
+    if browser_session_blocked; then
+      log "VPN reconnect is blocked by the browser session attempt limit; run '$PROGRAM_NAME connect' after manual recovery."
+      return "$BROWSER_SESSION_BLOCK_RC"
     fi
     log "OpenConnect is running as pid $pid, but the ping target is not reachable; reconnecting."
     signal_tracked_openconnect HUP
     sleep 2
+  fi
+
+  if browser_session_blocked; then
+    log "VPN reconnect is blocked by the browser session attempt limit; run '$PROGRAM_NAME connect' after manual recovery."
+    return "$BROWSER_SESSION_BLOCK_RC"
   fi
 
   repair_stale_vpn_server_route
@@ -540,6 +659,7 @@ command_connect() {
   local target
   target="$(resolve_ping_target || true)"
   if [[ -n "$target" ]] && ping_target_ok "$target"; then
+    reset_browser_session_attempts "connectivity OK"
     log "Connectivity is already OK for $target; not starting a duplicate tunnel."
     return 0
   fi
@@ -550,12 +670,14 @@ command_connect() {
   else
     rc=$?
     log "Cookie helper failed."
+    block_browser_session_attempts_if_exhausted "cookie helper failed" || return "$?"
     return "$rc"
   fi
 
   if start_openconnect_with_cookie "$json"; then
     return 0
   fi
+  block_browser_session_attempts_if_exhausted "OpenConnect failed after browser session attempt" || return "$?"
 
   log "First OpenConnect attempt failed; forcing browser relogin and retrying once."
   if json="$(run_cookie_helper --force-login)"; then
@@ -563,9 +685,15 @@ command_connect() {
   else
     rc=$?
     log "Forced browser relogin failed."
+    block_browser_session_attempts_if_exhausted "forced browser relogin failed" || return "$?"
     return "$rc"
   fi
-  start_openconnect_with_cookie "$json"
+  if start_openconnect_with_cookie "$json"; then
+    return 0
+  fi
+  rc=$?
+  block_browser_session_attempts_if_exhausted "OpenConnect failed after forced browser session attempt" || return "$?"
+  return "$rc"
 }
 
 command_disconnect() {
@@ -611,6 +739,7 @@ command_status() {
   print "Tracked:      $(tracked_pid_status)"
   print "VPN IP:       $ip"
   print "Ping:         $ping_status"
+  print "Browser tries: $(browser_session_budget_status)"
   [[ -n "$server_info" ]] && print "VPN gateway:  ${server_parts[1]:-unknown} via ${server_parts[2]:-unknown} on ${server_parts[3]:-unknown}${server_route_status}"
   print "OpenConnect processes:"
   if [[ -n "$any" ]]; then
@@ -642,6 +771,7 @@ command_doctor() {
   print "OpenConnect:  $OPENCONNECT_BIN $([[ -x "$OPENCONNECT_BIN" ]] && print OK || print missing)"
   print "vpnc-script:  $VPNC_SCRIPT $([[ -x "$VPNC_SCRIPT" ]] && print OK || print missing)"
   print "Ping target:  $(resolve_ping_target || true)"
+  print "Browser tries: $(browser_session_budget_status)"
   local keychain_ok=1
   if [[ "$(id -u)" == "$USER_UID" ]]; then
     HOME="$USER_HOME" /usr/bin/security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$UC_DAVIS_EMAIL" >/dev/null 2>&1 && keychain_ok=0
@@ -660,11 +790,16 @@ monitor_once() {
   target="$(resolve_ping_target || true)"
   if [[ -n "$target" ]] && ping_target_ok "$target"; then
     log "Connectivity OK: $target"
+    reset_browser_session_attempts "connectivity OK"
     return 0
   fi
 
   log "Connectivity failed: ${target:-unresolved target}"
   [[ "$AUTO_RECONNECT" == "1" ]] || return 1
+  if browser_session_blocked; then
+    log "Auto reconnect is paused by the browser session attempt limit; run '$PROGRAM_NAME connect' after manual recovery."
+    return "$BROWSER_SESSION_BLOCK_RC"
+  fi
 
   if [[ -f "$PID_FILE" ]]; then
     local pid
@@ -688,6 +823,7 @@ command_run() {
   local failures=0
   local last_attempt=0
   local rc=0
+  local blocked_logged=0
 
   if [[ "$CONNECT_ON_START" == "1" ]]; then
     local target
@@ -700,6 +836,8 @@ command_run() {
         rc=$?
         if (( rc == RETRY_WITHOUT_COOLDOWN_RC )); then
           log "Startup connect skipped full reconnect cooldown because GUI login is not ready."
+        elif (( rc == BROWSER_SESSION_BLOCK_RC )); then
+          log "Startup connect is paused by the browser session attempt limit."
         else
           last_attempt="$(date +%s)"
         fi
@@ -712,7 +850,18 @@ command_run() {
     target="$(resolve_ping_target || true)"
     if [[ -n "$target" ]] && ping_target_ok "$target"; then
       failures=0
+      blocked_logged=0
+      reset_browser_session_attempts "connectivity OK"
     else
+      if browser_session_blocked; then
+        if (( blocked_logged == 0 )); then
+          log "Auto reconnect is paused by the browser session attempt limit; run '$PROGRAM_NAME connect' after manual recovery."
+          blocked_logged=1
+        fi
+        sleep "$CHECK_INTERVAL_SECONDS"
+        continue
+      fi
+      blocked_logged=0
       failures=$((failures + 1))
       log "Monitor failure $failures/$FAILURE_THRESHOLD for ${target:-unresolved target}"
       now="$(date +%s)"
@@ -726,6 +875,8 @@ command_run() {
           rc=$?
           if (( rc == RETRY_WITHOUT_COOLDOWN_RC )); then
             log "Reconnect prerequisites are not ready; retrying on the next monitor cycle."
+          elif (( rc == BROWSER_SESSION_BLOCK_RC )); then
+            log "Auto reconnect is now paused by the browser session attempt limit."
           else
             last_attempt="$now"
             failures=0

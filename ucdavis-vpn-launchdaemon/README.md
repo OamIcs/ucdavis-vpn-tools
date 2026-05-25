@@ -90,16 +90,23 @@ PING_TARGET=
 CHECK_INTERVAL_SECONDS=60
 FAILURE_THRESHOLD=2
 RECONNECT_COOLDOWN_SECONDS=180
+GUI_SESSION_WAIT_SECONDS=120
+GUI_SESSION_POLL_SECONDS=2
 AUTO_RECONNECT=1
 CONNECT_ON_START=1
 ```
 
 If you do not use an SSH alias, set `PING_TARGET` to an internal IP or hostname.
+When the daemon starts before the desktop GUI is ready after boot, it waits up to
+`GUI_SESSION_WAIT_SECONDS` for the user's GUI session before treating browser
+login as temporarily unavailable. That temporary state retries without the full
+reconnect cooldown.
 
 After editing config:
 
 ```zsh
-sudo launchctl kickstart -k system/local.ucdavis-openconnect-daemon
+sudo launchctl bootout system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist 2>/dev/null || true
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
 ```
 
 ## Commands
@@ -117,7 +124,6 @@ LaunchDaemon control:
 
 ```zsh
 sudo launchctl bootstrap system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
-sudo launchctl kickstart -k system/local.ucdavis-openconnect-daemon
 sudo launchctl print system/local.ucdavis-openconnect-daemon
 sudo launchctl bootout system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
 ```

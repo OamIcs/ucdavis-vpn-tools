@@ -71,10 +71,8 @@ print "  $PLIST_FILE"
 if [[ "$START_AFTER_INSTALL" == "1" ]]; then
   /bin/launchctl bootout system "$PLIST_FILE" >/dev/null 2>&1 || true
   /bin/launchctl bootstrap system "$PLIST_FILE"
-  /bin/launchctl kickstart -k "system/$LABEL"
   print "Started $LABEL"
 else
   print "Not started. To enable now:"
   print "  sudo launchctl bootstrap system \"$PLIST_FILE\""
-  print "  sudo launchctl kickstart -k system/$LABEL"
 fi

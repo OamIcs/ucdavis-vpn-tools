@@ -52,6 +52,8 @@ CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-60}"
 FAILURE_THRESHOLD="${FAILURE_THRESHOLD:-2}"
 RECONNECT_COOLDOWN_SECONDS="${RECONNECT_COOLDOWN_SECONDS:-180}"
 VERIFY_AFTER_CONNECT_SECONDS="${VERIFY_AFTER_CONNECT_SECONDS:-25}"
+GUI_SESSION_WAIT_SECONDS="${GUI_SESSION_WAIT_SECONDS:-120}"
+GUI_SESSION_POLL_SECONDS="${GUI_SESSION_POLL_SECONDS:-2}"
 AUTO_RECONNECT="${AUTO_RECONNECT:-1}"
 CONNECT_ON_START="${CONNECT_ON_START:-1}"
 
@@ -75,6 +77,8 @@ CHROME_PROFILE_DIR="${CHROME_PROFILE_DIR:-$USER_HOME/.local/state/ucdavis-vpn-ch
 CHROME_CDP_PORT="${CHROME_CDP_PORT:-9223}"
 CHROME_APP="${CHROME_APP:-Google Chrome}"
 CLOSE_WINDOW_AFTER_COOKIE="${CLOSE_WINDOW_AFTER_COOKIE:-1}"
+
+RETRY_WITHOUT_COOLDOWN_RC=75
 
 mkdir -p "$STATE_DIR" "$DB_DIR" "$LOG_DIR" 2>/dev/null || true
 
@@ -343,6 +347,17 @@ user_gui_available() {
   /bin/launchctl print "gui/$USER_UID" >/dev/null 2>&1
 }
 
+wait_for_user_gui() {
+  local start now
+  start="$(date +%s)"
+  while true; do
+    user_gui_available && return 0
+    now="$(date +%s)"
+    (( now - start >= GUI_SESSION_WAIT_SECONDS )) && return 1
+    sleep "$GUI_SESSION_POLL_SECONDS"
+  done
+}
+
 run_cookie_helper() {
   [[ -n "$USER_NAME" && -n "$USER_UID" && -n "$USER_HOME" ]] || {
     log "USER_NAME, USER_UID, and USER_HOME must be configured."
@@ -356,9 +371,9 @@ run_cookie_helper() {
     log "COOKIE_HELPER must be configured."
     return 1
   }
-  user_gui_available || {
-    log "GUI session gui/$USER_UID is not available; cannot refresh browser cookie yet."
-    return 1
+  wait_for_user_gui || {
+    log "GUI session gui/$USER_UID is not available after ${GUI_SESSION_WAIT_SECONDS}s; will retry without reconnect cooldown."
+    return "$RETRY_WITHOUT_COOLDOWN_RC"
   }
   [[ -x "$NODE_BIN" ]] || {
     log "Node binary not executable: $NODE_BIN"
@@ -515,10 +530,13 @@ command_connect() {
     return 0
   fi
 
-  local json
-  if ! json="$(run_cookie_helper)"; then
+  local json rc
+  if json="$(run_cookie_helper)"; then
+    :
+  else
+    rc=$?
     log "Cookie helper failed."
-    return 1
+    return "$rc"
   fi
 
   if start_openconnect_with_cookie "$json"; then
@@ -526,9 +544,12 @@ command_connect() {
   fi
 
   log "First OpenConnect attempt failed; forcing browser relogin and retrying once."
-  if ! json="$(run_cookie_helper --force-login)"; then
+  if json="$(run_cookie_helper --force-login)"; then
+    :
+  else
+    rc=$?
     log "Forced browser relogin failed."
-    return 1
+    return "$rc"
   fi
   start_openconnect_with_cookie "$json"
 }
@@ -652,14 +673,23 @@ command_run() {
   log "Starting daemon loop. interval=${CHECK_INTERVAL_SECONDS}s threshold=$FAILURE_THRESHOLD auto=$AUTO_RECONNECT connect_on_start=$CONNECT_ON_START"
   local failures=0
   local last_attempt=0
+  local rc=0
 
   if [[ "$CONNECT_ON_START" == "1" ]]; then
     local target
     target="$(resolve_ping_target || true)"
     if [[ -z "$target" ]] || ! ping_target_ok "$target"; then
       log "Startup connectivity check failed; trying connect."
-      command_connect || true
-      last_attempt="$(date +%s)"
+      if command_connect; then
+        last_attempt="$(date +%s)"
+      else
+        rc=$?
+        if (( rc == RETRY_WITHOUT_COOLDOWN_RC )); then
+          log "Startup connect skipped full reconnect cooldown because GUI login is not ready."
+        else
+          last_attempt="$(date +%s)"
+        fi
+      fi
     fi
   fi
 
@@ -675,9 +705,18 @@ command_run() {
       if [[ "$AUTO_RECONNECT" == "1" ]] &&
          (( failures >= FAILURE_THRESHOLD )) &&
          (( now - last_attempt >= RECONNECT_COOLDOWN_SECONDS )); then
-        monitor_once || true
-        last_attempt="$now"
-        failures=0
+        if monitor_once; then
+          last_attempt="$now"
+          failures=0
+        else
+          rc=$?
+          if (( rc == RETRY_WITHOUT_COOLDOWN_RC )); then
+            log "Reconnect prerequisites are not ready; retrying on the next monitor cycle."
+          else
+            last_attempt="$now"
+            failures=0
+          fi
+        fi
       fi
     fi
     sleep "$CHECK_INTERVAL_SECONDS"

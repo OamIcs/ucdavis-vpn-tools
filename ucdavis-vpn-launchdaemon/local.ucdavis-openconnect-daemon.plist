@@ -14,7 +14,7 @@
     <string>run</string>
   </array>
 
-  <key>KeepAlive</key>
+  <key>RunAtLoad</key>
   <true/>
 
   <key>StandardOutPath</key>

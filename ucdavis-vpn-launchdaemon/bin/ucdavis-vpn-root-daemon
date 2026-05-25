@@ -60,6 +60,7 @@ DB_DIR="${DB_DIR:-/var/db/ucdavis-openconnect-daemon}"
 LOG_DIR="${LOG_DIR:-/var/log/ucdavis-openconnect-daemon}"
 PID_FILE="${PID_FILE:-$STATE_DIR/openconnect.pid}"
 COOKIE_META_FILE="${COOKIE_META_FILE:-$DB_DIR/cookie-meta.json}"
+RUN_LOCK_DIR="${RUN_LOCK_DIR:-$DB_DIR/run.lock}"
 DAEMON_LOG_FILE="${DAEMON_LOG_FILE:-$LOG_DIR/daemon.log}"
 OPENCONNECT_LOG_FILE="${OPENCONNECT_LOG_FILE:-$LOG_DIR/openconnect.log}"
 
@@ -149,6 +150,44 @@ pid_from_file() {
 pid_running() {
   local pid="$1"
   kill -0 "$pid" >/dev/null 2>&1 || ps -p "$pid" -o pid= >/dev/null 2>&1
+}
+
+acquire_run_lock() {
+  local lock_pid=""
+  while ! mkdir "$RUN_LOCK_DIR" 2>/dev/null; do
+    lock_pid=""
+    [[ -f "$RUN_LOCK_DIR/pid" ]] && lock_pid="$(<"$RUN_LOCK_DIR/pid")"
+    if [[ "$lock_pid" == <-> ]] && pid_running "$lock_pid"; then
+      log "Another daemon loop is active as pid $lock_pid; waiting for the singleton lock."
+      sleep "$CHECK_INTERVAL_SECONDS"
+      continue
+    fi
+    log "Removing stale daemon singleton lock."
+    rm -rf "$RUN_LOCK_DIR"
+  done
+  print -r -- "$$" > "$RUN_LOCK_DIR/pid"
+  trap 'rm -rf "$RUN_LOCK_DIR"' EXIT INT TERM HUP
+}
+
+terminate_duplicate_run_processes() {
+  local -a pids
+  pids=(${(f)"$(/bin/ps -axo pid=,command= | /usr/bin/awk -v self="$$" '
+    $1 != self &&
+    $0 ~ /[u]cdavis-vpn-root-daemon/ &&
+    $0 ~ /--config/ &&
+    $0 ~ / run$/ {
+      print $1
+    }
+  ')"})
+  (( ${#pids[@]} )) || return 0
+
+  log "Terminating duplicate daemon loop pid(s): ${pids[*]}"
+  kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
+  sleep 1
+  local pid
+  for pid in "${pids[@]}"; do
+    pid_running "$pid" && kill -KILL "$pid" >/dev/null 2>&1 || true
+  done
 }
 
 tracked_pid_status() {
@@ -356,24 +395,36 @@ json_field() {
     let data = "";
     process.stdin.on("data", chunk => data += chunk);
     process.stdin.on("end", () => {
-      const json = JSON.parse(data);
-      const value = json[field];
-      if (Array.isArray(value)) process.stdout.write(value.join(", "));
-      else if (value !== undefined && value !== null) process.stdout.write(String(value));
+      try {
+        const json = JSON.parse(data);
+        const value = json[field];
+        if (Array.isArray(value)) process.stdout.write(value.join(", "));
+        else if (value !== undefined && value !== null) process.stdout.write(String(value));
+      } catch {
+        process.exit(2);
+      }
     });
   ' "$field"
 }
 
 write_cookie_meta() {
+  local tmp="$COOKIE_META_FILE.tmp.$$"
   "$NODE_BIN" -e '
     let data = "";
     process.stdin.on("data", chunk => data += chunk);
     process.stdin.on("end", () => {
-      const json = JSON.parse(data);
-      delete json.cookie;
-      process.stdout.write(JSON.stringify(json, null, 2) + "\n");
+      try {
+        const json = JSON.parse(data);
+        delete json.cookie;
+        process.stdout.write(JSON.stringify(json, null, 2) + "\n");
+      } catch {
+        process.exit(2);
+      }
     });
-  ' > "$COOKIE_META_FILE"
+  ' > "$tmp" && mv "$tmp" "$COOKIE_META_FILE"
+  local rc=$?
+  [[ "$rc" == "0" ]] || rm -f "$tmp"
+  return "$rc"
 }
 
 openconnect_args() {
@@ -410,8 +461,11 @@ signal_tracked_openconnect() {
 start_openconnect_with_cookie() {
   local json="$1"
   local cookie
-  print -r -- "$json" | write_cookie_meta
-  cookie="$(print -r -- "$json" | json_field cookie)"
+  if ! print -r -- "$json" | write_cookie_meta; then
+    log "Cookie helper returned invalid JSON."
+    return 1
+  fi
+  cookie="$(print -r -- "$json" | json_field cookie || true)"
   [[ -n "$cookie" ]] || {
     log "No VPN cookie available."
     return 1
@@ -597,6 +651,8 @@ command_once() {
 
 command_run() {
   require_root
+  acquire_run_lock
+  terminate_duplicate_run_processes
   log "Starting daemon loop. interval=${CHECK_INTERVAL_SECONDS}s threshold=$FAILURE_THRESHOLD auto=$AUTO_RECONNECT connect_on_start=$CONNECT_ON_START"
   local failures=0
   local last_attempt=0

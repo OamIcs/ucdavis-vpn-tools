@@ -153,41 +153,20 @@ pid_running() {
 }
 
 acquire_run_lock() {
+  local self_pid="${ZSH_PID:-$$}"
   local lock_pid=""
   while ! mkdir "$RUN_LOCK_DIR" 2>/dev/null; do
     lock_pid=""
     [[ -f "$RUN_LOCK_DIR/pid" ]] && lock_pid="$(<"$RUN_LOCK_DIR/pid")"
     if [[ "$lock_pid" == <-> ]] && pid_running "$lock_pid"; then
-      log "Another daemon loop is active as pid $lock_pid; waiting for the singleton lock."
-      sleep "$CHECK_INTERVAL_SECONDS"
-      continue
+      log "Another daemon loop is active as pid $lock_pid; exiting duplicate launcher pid $self_pid."
+      exit 0
     fi
     log "Removing stale daemon singleton lock."
     rm -rf "$RUN_LOCK_DIR"
   done
-  print -r -- "$$" > "$RUN_LOCK_DIR/pid"
+  print -r -- "$self_pid" > "$RUN_LOCK_DIR/pid"
   trap 'rm -rf "$RUN_LOCK_DIR"' EXIT INT TERM HUP
-}
-
-terminate_duplicate_run_processes() {
-  local -a pids
-  pids=(${(f)"$(/bin/ps -axo pid=,command= | /usr/bin/awk -v self="$$" '
-    $1 != self &&
-    $0 ~ /[u]cdavis-vpn-root-daemon/ &&
-    $0 ~ /--config/ &&
-    $0 ~ / run$/ {
-      print $1
-    }
-  ')"})
-  (( ${#pids[@]} )) || return 0
-
-  log "Terminating duplicate daemon loop pid(s): ${pids[*]}"
-  kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
-  sleep 1
-  local pid
-  for pid in "${pids[@]}"; do
-    pid_running "$pid" && kill -KILL "$pid" >/dev/null 2>&1 || true
-  done
 }
 
 tracked_pid_status() {
@@ -652,7 +631,6 @@ command_once() {
 command_run() {
   require_root
   acquire_run_lock
-  terminate_duplicate_run_processes
   log "Starting daemon loop. interval=${CHECK_INTERVAL_SECONDS}s threshold=$FAILURE_THRESHOLD auto=$AUTO_RECONNECT connect_on_start=$CONNECT_ON_START"
   local failures=0
   local last_attempt=0

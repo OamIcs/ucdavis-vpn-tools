@@ -147,7 +147,7 @@ timestamp() {
 
 log() {
   local line="[$(timestamp)] $*"
-  print -r -- "$line"
+  print -u2 -r -- "$line"
   print -r -- "$line" >> "$DAEMON_LOG_FILE"
 }
 
@@ -841,26 +841,8 @@ command_connect() {
     return 0
   fi
   block_browser_session_attempts_if_exhausted "OpenConnect failed after browser session attempt" || return "$?"
-  if [[ "$COMMAND" != "connect" ]]; then
-    log "Automatic connect will not force a second browser login in the same cycle."
-    return 1
-  fi
-
-  log "First OpenConnect attempt failed; forcing browser relogin and retrying once."
-  if json="$(run_cookie_helper --force-login)"; then
-    :
-  else
-    rc=$?
-    log "Forced browser relogin failed."
-    block_browser_session_attempts_if_exhausted "forced browser relogin failed" || return "$?"
-    return "$rc"
-  fi
-  if start_openconnect_with_cookie "$json"; then
-    return 0
-  fi
-  rc=$?
-  block_browser_session_attempts_if_exhausted "OpenConnect failed after forced browser session attempt" || return "$?"
-  return "$rc"
+  log "Not forcing a second browser login in the same connect cycle."
+  return 1
 }
 
 command_disconnect() {

@@ -58,6 +58,9 @@ UC_DAVIS_VPN_DAEMON_SOURCE_ONLY=1 source "$ROOT_DIR/bin/ucdavis-vpn-root-daemon"
 
 mkdir -p "$STATE_DIR" "$DB_DIR" "$LOG_DIR"
 
+log_stdout="$(log "unit log should not contaminate stdout" 2>/dev/null || true)"
+assert_eq "" "$log_stdout" "log stdout"
+
 assert_eq "0/2" "$(browser_session_budget_status)" "initial browser budget"
 record_browser_session_attempt "unit one" >/dev/null
 assert_eq "1/2" "$(browser_session_budget_status)" "first browser attempt"

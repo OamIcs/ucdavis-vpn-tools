@@ -159,8 +159,14 @@ acquire_run_lock() {
     lock_pid=""
     [[ -f "$RUN_LOCK_DIR/pid" ]] && lock_pid="$(<"$RUN_LOCK_DIR/pid")"
     if [[ "$lock_pid" == <-> ]] && pid_running "$lock_pid"; then
-      log "Another daemon loop is active as pid $lock_pid; exiting duplicate launcher pid $self_pid."
-      exit 0
+      log "Another daemon loop is active as pid $lock_pid; launcher pid $self_pid is standing by."
+      while [[ "$lock_pid" == <-> ]] && pid_running "$lock_pid"; do
+        sleep "$CHECK_INTERVAL_SECONDS"
+        [[ -f "$RUN_LOCK_DIR/pid" ]] && lock_pid="$(<"$RUN_LOCK_DIR/pid")" || lock_pid=""
+      done
+      log "Daemon singleton lock holder exited; trying to acquire lock."
+      rm -rf "$RUN_LOCK_DIR"
+      continue
     fi
     log "Removing stale daemon singleton lock."
     rm -rf "$RUN_LOCK_DIR"

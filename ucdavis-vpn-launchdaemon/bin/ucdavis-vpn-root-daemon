@@ -152,13 +152,25 @@ pid_running() {
   kill -0 "$pid" >/dev/null 2>&1 || ps -p "$pid" -o pid= >/dev/null 2>&1
 }
 
+launchd_tracked_pid() {
+  /bin/launchctl print "system/$LABEL" 2>/dev/null | /usr/bin/awk '
+    /^[[:space:]]*pid = [0-9]+$/ { print $3; exit }
+  '
+}
+
 acquire_run_lock() {
   local self_pid="${ZSH_PID:-$$}"
   local lock_pid=""
+  local tracked_pid=""
   while ! mkdir "$RUN_LOCK_DIR" 2>/dev/null; do
     lock_pid=""
     [[ -f "$RUN_LOCK_DIR/pid" ]] && lock_pid="$(<"$RUN_LOCK_DIR/pid")"
     if [[ "$lock_pid" == <-> ]] && pid_running "$lock_pid"; then
+      tracked_pid="$(launchd_tracked_pid || true)"
+      if [[ "$tracked_pid" == "$lock_pid" && "$self_pid" != "$tracked_pid" ]]; then
+        log "Daemon singleton lock is held by launchd-tracked pid $lock_pid; exiting duplicate launcher pid $self_pid."
+        exit 0
+      fi
       log "Another daemon loop is active as pid $lock_pid; launcher pid $self_pid is standing by."
       while [[ "$lock_pid" == <-> ]] && pid_running "$lock_pid"; do
         sleep "$CHECK_INTERVAL_SECONDS"

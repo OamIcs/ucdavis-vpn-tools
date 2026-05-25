@@ -93,17 +93,17 @@ PING_TARGET=
 CHECK_INTERVAL_SECONDS=60
 FAILURE_THRESHOLD=2
 RECONNECT_COOLDOWN_SECONDS=180
-GUI_SESSION_WAIT_SECONDS=120
-GUI_SESSION_POLL_SECONDS=2
+GUI_SESSION_WAIT_SECONDS=0
+GUI_SESSION_POLL_SECONDS=1
 AUTO_RECONNECT=1
 CONNECT_ON_START=1
 ```
 
 If you do not use an SSH alias, set `PING_TARGET` to an internal IP or hostname.
-When the daemon starts before the desktop GUI is ready after boot, it waits up to
-`GUI_SESSION_WAIT_SECONDS` for the user's GUI session before treating browser
-login as temporarily unavailable. That temporary state retries without the full
-reconnect cooldown.
+When the daemon starts before the desktop GUI is ready after boot,
+`GUI_SESSION_WAIT_SECONDS=0` means it keeps polling the user's GUI session until
+it is available, then immediately starts the browser login helper. Set a positive
+number to use a bounded wait instead.
 
 After editing config:
 

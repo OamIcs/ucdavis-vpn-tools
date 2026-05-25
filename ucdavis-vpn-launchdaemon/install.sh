@@ -24,6 +24,15 @@ shell_escape_sed() {
   printf '%s' "$1" | /usr/bin/sed 's/[\/&]/\\&/g'
 }
 
+ensure_config_default() {
+  local key="$1"
+  local value="$2"
+  if ! /usr/bin/grep -q "^${key}=" "$CONFIG_FILE"; then
+    print "${key}=${value}" >> "$CONFIG_FILE"
+    print "Added default config: $key=$value"
+  fi
+}
+
 remove_legacy_launchdaemons() {
   local legacy_label legacy_plist
   for legacy_label in "${LEGACY_LABELS[@]}"; do
@@ -70,6 +79,9 @@ else
     "$ROOT_DIR/config.env.example" > "$CONFIG_FILE"
   chmod 0644 "$CONFIG_FILE"
 fi
+
+ensure_config_default GUI_SESSION_WAIT_SECONDS 0
+ensure_config_default GUI_SESSION_POLL_SECONDS 1
 
 install -m 0644 "$PLIST_TEMPLATE" "$PLIST_FILE"
 chown root:wheel "$INSTALL_BIN" "$PLIST_FILE"

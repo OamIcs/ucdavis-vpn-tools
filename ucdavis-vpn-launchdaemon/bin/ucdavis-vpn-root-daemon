@@ -619,6 +619,7 @@ wait_for_user_gui() {
 }
 
 run_cookie_helper() {
+  local helper_output helper_rc
   [[ -n "$USER_NAME" && -n "$USER_UID" && -n "$USER_HOME" ]] || {
     log "USER_NAME, USER_UID, and USER_HOME must be configured."
     return 1
@@ -652,6 +653,8 @@ run_cookie_helper() {
     return "$attempt_rc"
   }
 
+  helper_output="$STATE_DIR/cookie-helper-output.$$"
+  rm -f "$helper_output"
   /bin/launchctl asuser "$USER_UID" /usr/bin/sudo -u "$USER_NAME" \
     /usr/bin/env \
       HOME="$USER_HOME" \
@@ -665,7 +668,19 @@ run_cookie_helper() {
       UCD_VPN_CDP_PORT="$CHROME_CDP_PORT" \
       UCD_VPN_CHROME_APP="$CHROME_APP" \
       UCD_VPN_CLOSE_WINDOW_AFTER_COOKIE="$CLOSE_WINDOW_AFTER_COOKIE" \
-      "$NODE_BIN" "$COOKIE_HELPER" --json "$@"
+      "$NODE_BIN" "$COOKIE_HELPER" --json "$@" > "$helper_output"
+  helper_rc=$?
+  if (( helper_rc != 0 )); then
+    rm -f "$helper_output"
+    return "$helper_rc"
+  fi
+  if [[ ! -s "$helper_output" ]]; then
+    log "Cookie helper completed without JSON output."
+    rm -f "$helper_output"
+    return 1
+  fi
+  cat "$helper_output"
+  rm -f "$helper_output"
 }
 
 json_field() {
@@ -826,6 +841,10 @@ command_connect() {
     return 0
   fi
   block_browser_session_attempts_if_exhausted "OpenConnect failed after browser session attempt" || return "$?"
+  if [[ "$COMMAND" != "connect" ]]; then
+    log "Automatic connect will not force a second browser login in the same cycle."
+    return 1
+  fi
 
   log "First OpenConnect attempt failed; forcing browser relogin and retrying once."
   if json="$(run_cookie_helper --force-login)"; then

@@ -61,6 +61,7 @@ LOG_DIR="${LOG_DIR:-/var/log/ucdavis-openconnect-daemon}"
 PID_FILE="${PID_FILE:-$STATE_DIR/openconnect.pid}"
 COOKIE_META_FILE="${COOKIE_META_FILE:-$DB_DIR/cookie-meta.json}"
 RUN_LOCK_DIR="${RUN_LOCK_DIR:-$DB_DIR/run.lock}"
+RUN_LOCK_OWNER_PID=""
 DAEMON_LOG_FILE="${DAEMON_LOG_FILE:-$LOG_DIR/daemon.log}"
 OPENCONNECT_LOG_FILE="${OPENCONNECT_LOG_FILE:-$LOG_DIR/openconnect.log}"
 
@@ -152,6 +153,14 @@ pid_running() {
   kill -0 "$pid" >/dev/null 2>&1 || ps -p "$pid" -o pid= >/dev/null 2>&1
 }
 
+cleanup_run_lock() {
+  local self_pid="${ZSH_PID:-$$}"
+  [[ -n "$RUN_LOCK_OWNER_PID" && "$self_pid" == "$RUN_LOCK_OWNER_PID" ]] || return 0
+  local lock_pid=""
+  [[ -f "$RUN_LOCK_DIR/pid" ]] && lock_pid="$(<"$RUN_LOCK_DIR/pid")"
+  [[ "$lock_pid" == "$RUN_LOCK_OWNER_PID" ]] && rm -rf "$RUN_LOCK_DIR"
+}
+
 acquire_run_lock() {
   local self_pid="${ZSH_PID:-$$}"
   local lock_pid=""
@@ -165,8 +174,9 @@ acquire_run_lock() {
     log "Removing stale daemon singleton lock."
     rm -rf "$RUN_LOCK_DIR"
   done
+  RUN_LOCK_OWNER_PID="$self_pid"
   print -r -- "$self_pid" > "$RUN_LOCK_DIR/pid"
-  trap 'rm -rf "$RUN_LOCK_DIR"' EXIT INT TERM HUP
+  trap cleanup_run_lock EXIT INT TERM HUP
 }
 
 tracked_pid_status() {

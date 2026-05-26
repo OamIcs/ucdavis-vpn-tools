@@ -86,6 +86,8 @@ ensure_config_default GUI_SESSION_WAIT_SECONDS 0
 ensure_config_default GUI_SESSION_POLL_SECONDS 1
 ensure_config_default MAX_BROWSER_SESSION_ATTEMPTS 2
 ensure_config_default CONTROL_POLL_SECONDS 1
+ensure_config_default PRESERVE_DEFAULT_ROUTE 1
+ensure_config_default DEFAULT_ROUTE_RESTORE_DELAY_SECONDS 2
 if /usr/bin/grep -q '^MAX_BROWSER_SESSION_ATTEMPTS=3$' "$CONFIG_FILE"; then
   /usr/bin/sed -i '' 's/^MAX_BROWSER_SESSION_ATTEMPTS=3$/MAX_BROWSER_SESSION_ATTEMPTS=2/' "$CONFIG_FILE"
   print "Updated default config: MAX_BROWSER_SESSION_ATTEMPTS=2"

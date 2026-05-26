@@ -58,6 +58,9 @@ AUTO_RECONNECT="${AUTO_RECONNECT:-1}"
 CONNECT_ON_START="${CONNECT_ON_START:-1}"
 MAX_BROWSER_SESSION_ATTEMPTS="${MAX_BROWSER_SESSION_ATTEMPTS:-2}"
 [[ "$MAX_BROWSER_SESSION_ATTEMPTS" == <-> ]] || MAX_BROWSER_SESSION_ATTEMPTS=2
+PRESERVE_DEFAULT_ROUTE="${PRESERVE_DEFAULT_ROUTE:-1}"
+DEFAULT_ROUTE_RESTORE_DELAY_SECONDS="${DEFAULT_ROUTE_RESTORE_DELAY_SECONDS:-2}"
+[[ "$DEFAULT_ROUTE_RESTORE_DELAY_SECONDS" == <-> ]] || DEFAULT_ROUTE_RESTORE_DELAY_SECONDS=2
 
 STATE_DIR="${STATE_DIR:-/var/run/ucdavis-openconnect-daemon}"
 DB_DIR="${DB_DIR:-/var/db/ucdavis-openconnect-daemon}"
@@ -65,6 +68,7 @@ LOG_DIR="${LOG_DIR:-/var/log/ucdavis-openconnect-daemon}"
 PID_FILE="${PID_FILE:-$STATE_DIR/openconnect.pid}"
 COOKIE_META_FILE="${COOKIE_META_FILE:-$DB_DIR/cookie-meta.json}"
 RUN_LOCK_DIR="${RUN_LOCK_DIR:-$DB_DIR/run.lock}"
+PHYSICAL_DEFAULT_ROUTE_FILE="${PHYSICAL_DEFAULT_ROUTE_FILE:-$STATE_DIR/physical-default-route}"
 BROWSER_SESSION_ATTEMPTS_FILE="${BROWSER_SESSION_ATTEMPTS_FILE:-$STATE_DIR/browser-session-attempts}"
 BROWSER_SESSION_BLOCK_FILE="${BROWSER_SESSION_BLOCK_FILE:-$STATE_DIR/browser-session.blocked}"
 AUTO_RECONNECT_PAUSE_FILE="${AUTO_RECONNECT_PAUSE_FILE:-$STATE_DIR/auto-reconnect.paused}"
@@ -292,6 +296,134 @@ default_route_info() {
   print -r -- "$router|$iface"
 }
 
+is_tunnel_iface() {
+  local iface="$1"
+  [[ "$iface" == utun* || "$iface" == tun* || "$iface" == ppp* ]]
+}
+
+physical_route_from_interface() {
+  local iface="$1"
+  [[ -n "$iface" ]] || return 1
+  is_tunnel_iface "$iface" && return 1
+
+  local router
+  router="$(router_for_device "$iface" || true)"
+  [[ -n "$router" ]] || return 1
+  print -r -- "$router|$iface"
+}
+
+primary_physical_default_route_info() {
+  local info
+  info="$(default_route_info || true)"
+  if [[ -n "$info" ]]; then
+    local -a parts
+    parts=("${(@ps:|:)info}")
+    if [[ -n "${parts[1]:-}" && -n "${parts[2]:-}" ]] && ! is_tunnel_iface "${parts[2]:-}"; then
+      print -r -- "$info"
+      return 0
+    fi
+  fi
+
+  local iface
+  iface="$(/usr/sbin/scutil --nwi 2>/dev/null | /usr/bin/awk '
+    /IPv4 network interface information/ { in_ipv4=1; next }
+    /IPv6 network interface information/ { in_ipv4=0 }
+    in_ipv4 && /^[[:space:]]+[[:alnum:]]+[[:space:]]*:/ {
+      gsub(":", "", $1)
+      if ($1 !~ /^(utun|tun|ppp)/) {
+        print $1
+        exit
+      }
+    }
+  ')"
+  physical_route_from_interface "$iface"
+}
+
+remember_physical_default_route() {
+  [[ "$PRESERVE_DEFAULT_ROUTE" == "1" ]] || return 0
+  local info="${1:-}"
+  [[ -n "$info" ]] || info="$(primary_physical_default_route_info || true)"
+  [[ -n "$info" ]] || return 1
+
+  local -a parts
+  parts=("${(@ps:|:)info}")
+  [[ -n "${parts[1]:-}" && -n "${parts[2]:-}" ]] || return 1
+  is_tunnel_iface "${parts[2]:-}" && return 1
+
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  print -r -- "$info" > "$PHYSICAL_DEFAULT_ROUTE_FILE"
+}
+
+saved_physical_default_route_info() {
+  local info
+  if [[ -f "$PHYSICAL_DEFAULT_ROUTE_FILE" ]]; then
+    info="$(<"$PHYSICAL_DEFAULT_ROUTE_FILE")"
+    local -a parts
+    parts=("${(@ps:|:)info}")
+    if [[ -n "${parts[1]:-}" && -n "${parts[2]:-}" ]] && ! is_tunnel_iface "${parts[2]:-}"; then
+      print -r -- "$info"
+      return 0
+    fi
+  fi
+  primary_physical_default_route_info
+}
+
+restore_default_route() {
+  [[ "$PRESERVE_DEFAULT_ROUTE" == "1" ]] || return 0
+  local info="${1:-}"
+  local reason="${2:-route guard}"
+  [[ -n "$info" ]] || info="$(saved_physical_default_route_info || true)"
+  [[ -n "$info" ]] || return 1
+
+  local -a parts current_parts
+  parts=("${(@ps:|:)info}")
+  local gateway="${parts[1]:-}"
+  local iface="${parts[2]:-}"
+  [[ -n "$gateway" && -n "$iface" ]] || return 1
+  is_tunnel_iface "$iface" && return 1
+
+  local current
+  current="$(default_route_info || true)"
+  current_parts=("${(@ps:|:)current}")
+  local current_gateway="${current_parts[1]:-}"
+  local current_iface="${current_parts[2]:-}"
+
+  if [[ "$current_gateway" == "$gateway" && "$current_iface" == "$iface" ]]; then
+    remember_physical_default_route "$info" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if [[ -z "$current" || -z "$current_iface" || "$current_gateway" != "$gateway" || "$current_iface" != "$iface" ]]; then
+    log "Restoring physical default route via $gateway on $iface ($reason; current ${current_gateway:-none} on ${current_iface:-none})."
+    /sbin/route -n change default "$gateway" >/dev/null 2>&1 ||
+      {
+        /sbin/route -n delete default >/dev/null 2>&1 || true
+        /sbin/route -n add default "$gateway" >/dev/null 2>&1 ||
+          /sbin/route -n change default "$gateway" >/dev/null 2>&1 ||
+          true
+      }
+    remember_physical_default_route "$info" >/dev/null 2>&1 || true
+  fi
+}
+
+route_guard_tick() {
+  [[ "$PRESERVE_DEFAULT_ROUTE" == "1" ]] || return 0
+
+  local current
+  current="$(default_route_info || true)"
+  if [[ -n "$current" ]]; then
+    local -a parts
+    parts=("${(@ps:|:)current}")
+    local iface="${parts[2]:-}"
+    if [[ -n "$iface" ]] && ! is_tunnel_iface "$iface"; then
+      remember_physical_default_route "$current" >/dev/null 2>&1 || true
+      return 0
+    fi
+  fi
+
+  restore_default_route "" "monitor detected VPN-owned or missing default route" >/dev/null 2>&1 || true
+}
+
 vpn_server_route_info() {
   /sbin/route -n get "$SERVER" 2>/dev/null | /usr/bin/awk '
     /route to:/ { route=$3 }
@@ -338,6 +470,15 @@ ping_target_ok() {
   local target="$1"
   [[ -n "$target" ]] || return 1
   /sbin/ping -q -c "$PING_COUNT" -W "$PING_TIMEOUT_MS" "$target" >/dev/null 2>&1
+}
+
+vpn_session_ok() {
+  local target="${1:-}"
+  local pid
+  pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid" || return 1
+  [[ -n "$(vpn_internal_ip || true)" ]] || return 1
+  [[ -z "$target" ]] && return 0
+  ping_target_ok "$target"
 }
 
 vpn_internal_ip() {
@@ -755,6 +896,7 @@ signal_tracked_openconnect() {
 
 start_openconnect_with_cookie() {
   local json="$1"
+  local physical_default="${2:-}"
   local cookie
   if ! print -r -- "$json" | write_cookie_meta; then
     log "Cookie helper returned invalid JSON."
@@ -786,6 +928,11 @@ start_openconnect_with_cookie() {
     log "OpenConnect did not write pid file."
     return 1
   fi
+  if [[ "$PRESERVE_DEFAULT_ROUTE" == "1" ]]; then
+    restore_default_route "$physical_default" "after OpenConnect start" >/dev/null 2>&1 || true
+    sleep "$DEFAULT_ROUTE_RESTORE_DELAY_SECONDS"
+    restore_default_route "$physical_default" "after OpenConnect route script" >/dev/null 2>&1 || true
+  fi
   return 0
 }
 
@@ -798,7 +945,8 @@ command_connect() {
   if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
     local target
     target="$(resolve_ping_target || true)"
-    if [[ -n "$target" ]] && ping_target_ok "$target"; then
+    if vpn_session_ok "$target"; then
+      route_guard_tick
       reset_browser_session_attempts "connectivity OK"
       log "OpenConnect already running as pid $pid."
       return 0
@@ -818,14 +966,19 @@ command_connect() {
   fi
 
   repair_stale_vpn_server_route
+  route_guard_tick
 
   local target
   target="$(resolve_ping_target || true)"
-  if [[ -n "$target" ]] && ping_target_ok "$target"; then
+  if vpn_session_ok "$target"; then
     reset_browser_session_attempts "connectivity OK"
     log "Connectivity is already OK for $target; not starting a duplicate tunnel."
     return 0
   fi
+
+  local physical_default
+  physical_default="$(primary_physical_default_route_info || saved_physical_default_route_info || true)"
+  remember_physical_default_route "$physical_default" >/dev/null 2>&1 || true
 
   local json rc
   if json="$(run_cookie_helper)"; then
@@ -837,7 +990,7 @@ command_connect() {
     return "$rc"
   fi
 
-  if start_openconnect_with_cookie "$json"; then
+  if start_openconnect_with_cookie "$json" "$physical_default"; then
     return 0
   fi
   block_browser_session_attempts_if_exhausted "OpenConnect failed after browser session attempt" || return "$?"
@@ -899,6 +1052,19 @@ command_status() {
   ip="$(vpn_internal_ip || true)"
   [[ -n "$ip" ]] || ip="not found"
   any="$(any_openconnect 2>/dev/null || true)"
+  local current_default_info current_default_status="not found"
+  current_default_info="$(default_route_info || true)"
+  if [[ -n "$current_default_info" ]]; then
+    local -a current_default_parts
+    current_default_parts=("${(@ps:|:)current_default_info}")
+    current_default_status="${current_default_parts[1]:-unknown} on ${current_default_parts[2]:-unknown}"
+    if is_tunnel_iface "${current_default_parts[2]:-}"; then
+      current_default_status="$current_default_status (WARNING: VPN owns default route)"
+    elif [[ "$PRESERVE_DEFAULT_ROUTE" == "1" ]]; then
+      current_default_status="$current_default_status (guard active)"
+    fi
+  fi
+
   local server_info default_info server_route_status=""
   server_info="$(vpn_server_route_info || true)"
   if [[ -n "$server_info" ]]; then
@@ -917,6 +1083,7 @@ command_status() {
   print "Tracked:      $(tracked_pid_status)"
   print "VPN IP:       $ip"
   print "Ping:         $ping_status"
+  print "Default route: $current_default_status"
   print "Auto:         $(auto_reconnect_status)"
   print "Browser tries: $(browser_session_budget_status)"
   [[ -n "$server_info" ]] && print "VPN gateway:  ${server_parts[1]:-unknown} via ${server_parts[2]:-unknown} on ${server_parts[3]:-unknown}${server_route_status}"
@@ -967,8 +1134,9 @@ command_doctor() {
 
 monitor_once() {
   local target
+  route_guard_tick
   target="$(resolve_ping_target || true)"
-  if [[ -n "$target" ]] && ping_target_ok "$target"; then
+  if vpn_session_ok "$target"; then
     log "Connectivity OK: $target"
     reset_browser_session_attempts "connectivity OK"
     return 0
@@ -1014,8 +1182,9 @@ command_run() {
 
   if [[ "$CONNECT_ON_START" == "1" && ! -f "$AUTO_RECONNECT_PAUSE_FILE" ]]; then
     local target
+    route_guard_tick
     target="$(resolve_ping_target || true)"
-    if [[ -z "$target" ]] || ! ping_target_ok "$target"; then
+    if ! vpn_session_ok "$target"; then
       log "Startup connectivity check failed; trying connect."
       if command_connect; then
         last_attempt="$(date +%s)"
@@ -1035,8 +1204,9 @@ command_run() {
   while true; do
     local target now
     process_control_requests
+    route_guard_tick
     target="$(resolve_ping_target || true)"
-    if [[ -n "$target" ]] && ping_target_ok "$target"; then
+    if vpn_session_ok "$target"; then
       failures=0
       blocked_logged=0
       reset_browser_session_attempts "connectivity OK"

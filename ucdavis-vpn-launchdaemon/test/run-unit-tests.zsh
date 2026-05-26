@@ -41,6 +41,8 @@ GUI_SESSION_WAIT_SECONDS=1
 GUI_SESSION_POLL_SECONDS=1
 MAX_BROWSER_SESSION_ATTEMPTS=2
 CONTROL_POLL_SECONDS=1
+PRESERVE_DEFAULT_ROUTE=1
+DEFAULT_ROUTE_RESTORE_DELAY_SECONDS=0
 AUTO_RECONNECT=1
 CONNECT_ON_START=0
 STATE_DIR=$TMP_DIR/state
@@ -75,8 +77,18 @@ auto_reconnect_paused || fail "auto reconnect should be paused"
 clear_auto_reconnect_paused "unit resume" >/dev/null
 auto_reconnect_paused && fail "auto reconnect should be resumed"
 
+is_tunnel_iface utun6 || fail "utun should be treated as a tunnel interface"
+is_tunnel_iface en0 && fail "en0 should be treated as a physical interface"
+remember_physical_default_route "192.0.2.1|en0" >/dev/null
+assert_eq "192.0.2.1|en0" "$(saved_physical_default_route_info)" "saved physical route"
+if remember_physical_default_route "172.25.228.1|utun6" >/dev/null 2>&1; then
+  fail "tunnel default route should not be saved as physical"
+fi
+assert_eq "192.0.2.1|en0" "$(saved_physical_default_route_info)" "tunnel route should not replace saved physical route"
+
 status_output="$("$ROOT_DIR/bin/ucdavis-vpnctl" --config "$CONFIG_FILE" status)"
 print -r -- "$status_output" | /usr/bin/grep -q "Browser tries:" || fail "ctl status should include browser budget"
 print -r -- "$status_output" | /usr/bin/grep -q "Auto:" || fail "ctl status should include auto state"
+print -r -- "$status_output" | /usr/bin/grep -q "Default route:" || fail "ctl status should include default route"
 
 print "ok"

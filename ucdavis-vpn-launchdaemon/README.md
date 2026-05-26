@@ -98,6 +98,8 @@ GUI_SESSION_WAIT_SECONDS=0
 GUI_SESSION_POLL_SECONDS=1
 MAX_BROWSER_SESSION_ATTEMPTS=2
 CONTROL_POLL_SECONDS=1
+PRESERVE_DEFAULT_ROUTE=1
+DEFAULT_ROUTE_RESTORE_DELAY_SECONDS=2
 AUTO_RECONNECT=1
 CONNECT_ON_START=1
 ```
@@ -112,6 +114,10 @@ after two attempts while the VPN is still not verified by the ping monitor.
 The attempt state is stored under `/var/run`, so it resets after reboot. After
 fixing the network or logging in manually, a manual `connect` also clears the
 block and starts a fresh attempt:
+
+`PRESERVE_DEFAULT_ROUTE=1` keeps the macOS default route on the physical network
+after OpenConnect starts. This prevents the VPN route script from temporarily
+turning the tunnel into the machine-wide default internet path.
 
 ```zsh
 sudo /usr/local/sbin/ucdavis-vpn-root-daemon connect

@@ -1,19 +1,25 @@
 # UC Davis OpenConnect VPN Tools
 
-Command-line tools for connecting to a UC Davis Engineering VPN gateway with
-OpenConnect on macOS.
+macOS command-line tools for connecting to the UC Davis Engineering VPN with
+OpenConnect.
 
-This project is useful when you want to use OpenConnect as the local VPN client
-instead of the Ivanti desktop app. UC Davis SSO, MFA, and the VPN gateway are
-still used normally.
+This is a local-client replacement for the Ivanti desktop app, not a replacement
+for UC Davis SSO, MFA, or the VPN gateway. The UC Davis/Ivanti login flow is
+still used; OpenConnect creates the tunnel.
 
-## Features
+## Mental Model
 
-- Manual connect/disconnect commands for day-to-day use.
-- Chrome-based UC Davis login and MFA flow.
-- OpenConnect tunnel startup with status and reachability checks.
-- Optional root LaunchDaemon for always-on reconnect.
-- Local config, logs, and state kept outside the repository.
+```text
+Chrome login -> VPN cookie -> OpenConnect tunnel -> UC Davis internal network
+```
+
+The repository has two parts:
+
+- `ucdavis-openconnect-vpn/`: manual user-level tool. Start here.
+- `ucdavis-vpn-launchdaemon/`: optional root LaunchDaemon for auto-reconnect.
+
+Use the manual tool first. Install the daemon only after manual connect/status
+works reliably.
 
 ## Quick Start
 
@@ -23,7 +29,7 @@ Install dependencies:
 brew install openconnect
 ```
 
-Configure the user-level tool:
+Configure the manual tool:
 
 ```zsh
 cd ucdavis-openconnect-vpn
@@ -31,37 +37,20 @@ mkdir -p ~/.config/ucdavis-openconnect-vpn
 cp config.env.example ~/.config/ucdavis-openconnect-vpn/config.env
 ```
 
-Edit the config:
-
-```zsh
-~/.config/ucdavis-openconnect-vpn/config.env
-```
-
-At minimum, set:
+Edit `~/.config/ucdavis-openconnect-vpn/config.env` and set:
 
 ```zsh
 UC_DAVIS_EMAIL=your_email@ucdavis.edu
 ```
 
-Store your VPN password in macOS Keychain. See
-[ucdavis-openconnect-vpn/README.md](ucdavis-openconnect-vpn/README.md) for the
-exact command.
-
-Check the setup:
-
-```zsh
-bin/ucdavis-openconnect-vpn doctor
-```
+Store the VPN password in Keychain; see
+[ucdavis-openconnect-vpn/README.md](ucdavis-openconnect-vpn/README.md).
 
 Connect:
 
 ```zsh
+bin/ucdavis-openconnect-vpn doctor
 bin/ucdavis-openconnect-vpn connect
-```
-
-Check status:
-
-```zsh
 bin/ucdavis-openconnect-vpn status
 ```
 
@@ -71,84 +60,31 @@ Disconnect:
 bin/ucdavis-openconnect-vpn disconnect
 ```
 
-## Repository Structure
+## Optional Daemon
 
-```text
-ucdavis-vpn-tools/
-+-- ucdavis-openconnect-vpn/
-|   +-- User-level command-line wrapper
-|   +-- Chrome/CDP cookie helper
-|   +-- Best starting point for manual use
-|
-+-- ucdavis-vpn-launchdaemon/
-|   +-- Root LaunchDaemon wrapper
-|   +-- Connectivity monitor
-|   +-- Optional always-on reconnect layer
-|
-+-- docs/
-    +-- overview.md
-    +-- commands.md
-```
-
-## Which Tool Should I Use?
-
-Start with `ucdavis-openconnect-vpn/`. It is the manual user-level tool and is
-the easiest way to verify that login, cookies, OpenConnect, routes, and DNS all
-work on your machine.
-
-| Subproject | Runs as | Job |
-| --- | --- | --- |
-| `ucdavis-openconnect-vpn/` | Normal user, with sudo for OpenConnect | Open Chrome, get the VPN cookie, start/stop OpenConnect manually |
-| `ucdavis-vpn-launchdaemon/` | root LaunchDaemon | Keep the VPN up in the background and reconnect when reachability fails |
-
-Only after manual connection works reliably should you consider the
-LaunchDaemon:
+After manual connection works:
 
 ```zsh
 cd ../ucdavis-vpn-launchdaemon
 sudo ./install.sh
 ```
 
+The daemon runs OpenConnect as root and monitors a configured internal target.
+It still runs browser login as the normal GUI user.
+
+## Notes
+
+- This tool is for UC Davis VPN/internal resources. It is not a general-purpose
+  public Internet proxy.
+- Avoid combining it with other VPNs or proxies (like Clash or ShadowRocket).
+- Do not commit passwords, cookies, browser profiles, logs, pid files, or local
+  config files.
+
 ## Documentation
 
 - [ucdavis-openconnect-vpn/README.md](ucdavis-openconnect-vpn/README.md):
-  setup and usage for the manual user tool.
+  manual tool setup and use.
 - [ucdavis-vpn-launchdaemon/README.md](ucdavis-vpn-launchdaemon/README.md):
-  setup and usage for the optional root daemon.
-- [docs/overview.md](docs/overview.md): architecture, workflow, and the
-  Ivanti/OpenConnect relationship.
-- [docs/commands.md](docs/commands.md): every command and when to use it.
-
-## Requirements
-
-- macOS
-- Homebrew `openconnect`
-- Node.js
-- Google Chrome
-- UC Davis VPN account and MFA
-- macOS Keychain item for the VPN password
-
-Install OpenConnect:
-
-```zsh
-brew install openconnect
-```
-
-## Security
-
-This repository should not contain:
-
-- VPN passwords
-- Keychain exports
-- Browser profiles
-- VPN cookies
-- Logs, pid files, or local config files
-
-Passwords are read from macOS Keychain at runtime.
-
-Before sharing or publishing your fork, check for secrets and local paths:
-
-```zsh
-git status --short
-rg -n 'your[_]email|g[h]p_|D[S]ID|D[S]SIGNIN|/User[s]/[^ ]+' .
-```
+  optional daemon setup and use.
+- [docs/overview.md](docs/overview.md): architecture and detailed workflow.
+- [docs/commands.md](docs/commands.md): command reference.

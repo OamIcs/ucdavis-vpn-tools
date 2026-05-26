@@ -198,6 +198,53 @@ Use `ucdavis-vpn-launchdaemon` if:
 - You want automatic reconnect
 - You want OpenConnect to run as root without repeated sudo prompts
 
+## Compatibility With Other Proxy Software
+
+OpenConnect and proxy/VPN tools such as Clash can conflict when both try to
+control routing, DNS, or TUN interfaces.
+
+Known problematic combinations:
+
+- OpenConnect plus Clash TUN mode
+- OpenConnect plus Clash VPN mode
+- OpenConnect plus Clash fake-ip DNS mode
+- Multiple tools that create `utun` interfaces and install default routes
+
+The symptoms can look confusing:
+
+- UC Davis internal hosts are reachable, but public sites are not.
+- Public domains resolve to `198.18.0.x` fake IP addresses.
+- Browser behavior differs from `curl`.
+- One tool overwrites routes or DNS installed by the other.
+
+Recommended split:
+
+```text
+OpenConnect handles:
+  UC Davis VPN
+  UC Davis internal hosts
+  SSH/ping/internal services
+
+Clash handles:
+  YouTube, ChatGPT, and other public sites
+  HTTP/SOCKS proxy for browsers and command-line tools
+
+Disable:
+  Clash TUN/VPN mode
+  Clash fake-ip DNS mode when it interferes with system routing
+```
+
+For command-line tools, set proxy variables explicitly if needed:
+
+```zsh
+export HTTP_PROXY=http://127.0.0.1:7897
+export HTTPS_PROXY=http://127.0.0.1:7897
+export http_proxy=http://127.0.0.1:7897
+export https_proxy=http://127.0.0.1:7897
+```
+
+Use the port configured in your Clash client.
+
 ## Assumptions And Limits
 
 This approach depends on the UC Davis VPN gateway accepting OpenConnect Network

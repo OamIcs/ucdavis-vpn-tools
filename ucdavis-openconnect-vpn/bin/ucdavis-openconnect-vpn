@@ -29,6 +29,7 @@ OPENCONNECT_BIN="${OPENCONNECT_BIN:-/opt/homebrew/bin/openconnect}"
 VPNC_SCRIPT="${VPNC_SCRIPT:-/opt/homebrew/etc/vpnc/vpnc-script}"
 NODE_BIN="${NODE_BIN:-}"
 USE_SUDO="${USE_SUDO:-1}"
+OPENCONNECT_NOHUP="${OPENCONNECT_NOHUP:-1}"
 OPENCONNECT_NO_DTLS="${OPENCONNECT_NO_DTLS:-1}"
 OPENCONNECT_EXTRA_ARGS="${OPENCONNECT_EXTRA_ARGS:-}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/openconnect.log}"
@@ -434,10 +435,16 @@ command_connect() {
     sudo_cmd=(/usr/bin/sudo)
   fi
 
+  local -a nohup_cmd
+  nohup_cmd=()
+  if [[ "$OPENCONNECT_NOHUP" == "1" ]]; then
+    nohup_cmd=(/usr/bin/nohup)
+  fi
+
   print "Starting OpenConnect; log: $LOG_FILE"
   local -a args
   args=(${(Q)${(z)$(openconnect_args)}})
-  if ! print -rn -- "$cookie" | "${sudo_cmd[@]}" "${args[@]}" >> "$LOG_FILE" 2>&1; then
+  if ! print -rn -- "$cookie" | "${sudo_cmd[@]}" "${nohup_cmd[@]}" "${args[@]}" >> "$LOG_FILE" 2>&1; then
     print "First OpenConnect attempt failed; refreshing browser login cookie and retrying once."
     json="$(acquire_cookie_json --force-login)"
     print -r -- "$json" | write_cookie_meta
@@ -446,7 +453,7 @@ command_connect() {
       print -u2 "No VPN cookie available after relogin."
       return 1
     }
-    if ! print -rn -- "$cookie" | "${sudo_cmd[@]}" "${args[@]}" >> "$LOG_FILE" 2>&1; then
+    if ! print -rn -- "$cookie" | "${sudo_cmd[@]}" "${nohup_cmd[@]}" "${args[@]}" >> "$LOG_FILE" 2>&1; then
       print -u2 "OpenConnect failed. Recent log:"
       tail -n 40 "$LOG_FILE" >&2 || true
       return 1

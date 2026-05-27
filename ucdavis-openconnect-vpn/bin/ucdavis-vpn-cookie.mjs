@@ -23,6 +23,7 @@ const chromeApp = env("UCD_VPN_CHROME_APP", "Google Chrome");
 const cdpPort = Number(env("UCD_VPN_CDP_PORT", "9223"));
 const loginTimeoutMs = Number(env("UCD_VPN_LOGIN_TIMEOUT_MS", "240000"));
 const closeWindowAfterCookie = env("UCD_VPN_CLOSE_WINDOW_AFTER_COOKIE", "1") !== "0";
+const closeExistingSessions = env("UCD_VPN_CLOSE_EXISTING_SESSIONS", "1") !== "0";
 const loginUrl = env(
   "UCD_VPN_LOGIN_URL",
   `https://${server}/dana-na/auth/url_default/login.cgi?realm=Azure%20AD`,
@@ -294,6 +295,7 @@ async function submitSchoolPassword(send, password) {
 
 async function submitOpenSessionsLogin(send) {
   return await evalPage(send, `(() => {
+    const closeExistingSessions = ${JSON.stringify(closeExistingSessions)};
     const visible = (element) => !!(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
     const body = document.body?.innerText || "";
     const isOpenSessionsPrompt = /p=user(?:-|%2d)confirm/i.test(location.href) ||
@@ -318,37 +320,19 @@ async function submitOpenSessionsLogin(send) {
       candidates.find((element) => /^log\\s*in$|^login$/i.test(label(element))) ||
       candidates.find((element) => /log\\s*in|login/i.test(label(element)));
     if (!button) return false;
+    let selected = 0;
+    if (closeExistingSessions) {
+      const checkboxes = [...document.querySelectorAll("input[type=checkbox][name=postfixSID], input[type=checkbox][name*=SID i]")]
+        .filter(visible);
+      for (const checkbox of checkboxes) {
+        if (!checkbox.checked) checkbox.click();
+        checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+        if (checkbox.checked) selected += 1;
+      }
+    }
     if (button.form?.requestSubmit) button.form.requestSubmit(button);
     else button.click();
-    return true;
-  })()`);
-}
-
-async function submitIvantiSignIn(send) {
-  return await evalPage(send, `(() => {
-    const visible = (element) => !!(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
-    const body = document.body?.innerText || "";
-    const isIvantiSignInPrompt = /p=user(?:-|%2d)max(?:-|%2d)session/i.test(location.href) ||
-      /p=empty(?:-|%2d)assertion/i.test(location.href) ||
-      /maximum concurrent.*session|exceeded maximum concurrent|no assertion received/i.test(body);
-    if (!isIvantiSignInPrompt) return false;
-
-    const label = (element) => (
-      element.innerText ||
-      element.value ||
-      element.getAttribute("aria-label") ||
-      element.id ||
-      element.name ||
-      ""
-    ).trim();
-    const candidates = [...document.querySelectorAll("#btnSubmit_6, button[name=btnSubmit], button[type=submit], input[type=submit], button")]
-      .filter(visible)
-      .filter((element) => !/dismiss|cancel|logout|sign out/i.test(label(element)));
-    const button = candidates.find((element) => /sign\\s*in|login|log\\s*in/i.test(label(element))) || candidates[0];
-    if (!button) return false;
-    if (button.form?.requestSubmit) button.form.requestSubmit(button);
-    else button.click();
-    return true;
+    return { ok: true, selected };
   })()`);
 }
 
@@ -357,7 +341,6 @@ async function loginForCookie(send) {
   let submittedEmail = false;
   let submittedPassword = false;
   let lastOpenSessionsLoginAttemptAt = 0;
-  let ivantiSignInAttempts = 0;
   let password = "";
 
   log("opening VPN SAML login page");
@@ -381,23 +364,18 @@ async function loginForCookie(send) {
     }
 
     if (lastState.maxSessionsPromptVisible || lastState.emptyAssertionPromptVisible) {
-      if (ivantiSignInAttempts >= 3) {
-        throw new Error("VPN gateway keeps returning Ivanti sign-in recovery pages; close an existing VPN session manually and retry");
-      }
-      log(lastState.maxSessionsPromptVisible ? "retrying sign-in after maximum sessions page" : "retrying sign-in after empty assertion page");
-      ivantiSignInAttempts += 1;
-      if (await submitIvantiSignIn(send)) {
-        submittedEmail = false;
-        submittedPassword = false;
-        await sleep(1000);
-        continue;
-      }
+      const reason = lastState.maxSessionsPromptVisible ? "maximum concurrent sessions" : "no SAML assertion received";
+      throw new Error(`VPN gateway returned ${reason}; restart login from the VPN entry URL so the open-sessions page can close old sessions`);
     }
 
     if (lastState.openSessionsPromptVisible && Date.now() - lastOpenSessionsLoginAttemptAt > 3000) {
       log("continuing past existing VPN sessions prompt");
       lastOpenSessionsLoginAttemptAt = Date.now();
-      if (await submitOpenSessionsLogin(send)) {
+      const openSessionsResult = await submitOpenSessionsLogin(send);
+      if (openSessionsResult?.ok) {
+        if (closeExistingSessions) {
+          log(`selected ${openSessionsResult.selected || 0} existing VPN session(s) to close before login`);
+        }
         await sleep(1000);
         continue;
       }
@@ -456,6 +434,7 @@ async function main() {
       usedLogin,
       browserStarted,
       closeWindowAfterCookie,
+      closeExistingSessions,
       checkedAt: new Date().toISOString(),
     };
 

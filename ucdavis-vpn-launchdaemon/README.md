@@ -101,6 +101,7 @@ MAX_BROWSER_SESSION_ATTEMPTS=2
 CONTROL_POLL_SECONDS=1
 PRESERVE_DEFAULT_ROUTE=1
 DEFAULT_ROUTE_RESTORE_DELAY_SECONDS=2
+CLOSE_EXISTING_VPN_SESSIONS=1
 AUTO_RECONNECT=1
 CONNECT_ON_START=1
 ```
@@ -121,6 +122,8 @@ block and starts a fresh attempt:
 `PRESERVE_DEFAULT_ROUTE=1` keeps the macOS default route on the physical network
 after OpenConnect starts. This prevents the VPN route script from temporarily
 turning the tunnel into the machine-wide default internet path.
+`CLOSE_EXISTING_VPN_SESSIONS=1` tells the browser helper to select existing VPN
+web sessions for closure on the Ivanti open-sessions page before continuing.
 
 ```zsh
 sudo /usr/local/sbin/ucdavis-vpn-root-daemon connect

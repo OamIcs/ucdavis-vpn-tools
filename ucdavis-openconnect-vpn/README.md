@@ -96,10 +96,10 @@ The visible login tab can be closed after a cookie is captured while the profile
 and cookies remain available for later reconnects.
 
 If the VPN gateway reports existing open sessions during login, the browser
-helper leaves those sessions unchecked and clicks `Login` to continue.
+helper selects those sessions to close, then clicks `Login` to continue.
 If the gateway instead returns a maximum-session or empty-assertion recovery
-page, the helper clicks `Sign In` and retries a fresh sign-in a few times before
-asking for manual session cleanup.
+page, the helper stops and asks for a fresh login from the VPN entry URL so it
+can reach the open-sessions page cleanly.
 
 ## Security Notes
 

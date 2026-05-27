@@ -91,6 +91,7 @@ Important settings:
 UC_DAVIS_EMAIL=your_email@ucdavis.edu
 SSH_HOST_ALIAS=your-internal-host
 PING_TARGET=
+SSH_CONFIG_TIMEOUT_SECONDS=5
 CHECK_INTERVAL_SECONDS=60
 FAILURE_THRESHOLD=2
 RECONNECT_COOLDOWN_SECONDS=180
@@ -105,6 +106,8 @@ CONNECT_ON_START=1
 ```
 
 If you do not use an SSH alias, set `PING_TARGET` to an internal IP or hostname.
+When `SSH_HOST_ALIAS` is used, `SSH_CONFIG_TIMEOUT_SECONDS` bounds the `ssh -G`
+config lookup so a bad SSH config cannot hang the daemon control loop.
 When the daemon starts before the desktop GUI is ready after boot,
 `GUI_SESSION_WAIT_SECONDS=0` means it keeps polling the user's GUI session until
 it is available, then immediately starts the browser login helper. Set a positive

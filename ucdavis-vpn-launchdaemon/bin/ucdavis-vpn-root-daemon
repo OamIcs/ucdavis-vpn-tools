@@ -48,6 +48,7 @@ SSH_HOST_ALIAS="${SSH_HOST_ALIAS:-}"
 PING_TARGET="${PING_TARGET:-}"
 PING_COUNT="${PING_COUNT:-2}"
 PING_TIMEOUT_MS="${PING_TIMEOUT_MS:-1500}"
+SSH_CONFIG_TIMEOUT_SECONDS="${SSH_CONFIG_TIMEOUT_SECONDS:-5}"
 CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-60}"
 FAILURE_THRESHOLD="${FAILURE_THRESHOLD:-2}"
 RECONNECT_COOLDOWN_SECONDS="${RECONNECT_COOLDOWN_SECONDS:-180}"
@@ -225,11 +226,16 @@ resolve_ping_target() {
     return 0
   fi
   if [[ -n "$SSH_HOST_ALIAS" ]]; then
+    local -a ssh_cmd
+    ssh_cmd=(/usr/bin/ssh)
+    [[ -f "$USER_HOME/.ssh/config" ]] && ssh_cmd+=(-F "$USER_HOME/.ssh/config")
+    ssh_cmd+=(-G "$SSH_HOST_ALIAS")
     if [[ "$(id -u)" == "$USER_UID" ]]; then
-      HOME="$USER_HOME" /usr/bin/ssh -G "$SSH_HOST_ALIAS" 2>/dev/null |
+      HOME="$USER_HOME" USER="$USER_NAME" LOGNAME="$USER_NAME" "${ssh_cmd[@]}" 2>/dev/null |
         /usr/bin/awk 'tolower($1) == "hostname" { print $2; exit }'
     else
-      /usr/bin/sudo -u "$USER_NAME" HOME="$USER_HOME" /usr/bin/ssh -G "$SSH_HOST_ALIAS" 2>/dev/null |
+      HOME="$USER_HOME" USER="$USER_NAME" LOGNAME="$USER_NAME" \
+        /usr/bin/perl -e 'alarm shift; exec @ARGV' "$SSH_CONFIG_TIMEOUT_SECONDS" "${ssh_cmd[@]}" 2>/dev/null |
         /usr/bin/awk 'tolower($1) == "hostname" { print $2; exit }'
     fi
     return 0

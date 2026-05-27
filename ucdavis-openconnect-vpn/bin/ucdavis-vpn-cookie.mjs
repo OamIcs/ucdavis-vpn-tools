@@ -226,6 +226,7 @@ async function pageState(send) {
       readyState: document.readyState,
       emailVisible: [...document.querySelectorAll("input[type=email], input#i0116, input[name*=loginfmt], input[name*=email i]")].some(visible),
       passwordVisible: [...document.querySelectorAll("input[type=password], input#i0118")].some(visible),
+      openSessionsPromptVisible: /you have open user sessions|select sessions to close upon log in/i.test(document.body?.innerText || ""),
       buttons: [...document.querySelectorAll("input[type=submit], button")].filter(visible).slice(0, 8).map(label),
       body: document.body ? document.body.innerText.slice(0, 800) : ""
     };
@@ -284,10 +285,36 @@ async function submitSchoolPassword(send, password) {
   })()`);
 }
 
+async function submitOpenSessionsLogin(send) {
+  return await evalPage(send, `(() => {
+    const visible = (element) => !!(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+    const body = document.body?.innerText || "";
+    if (!/you have open user sessions|select sessions to close upon log in/i.test(body)) return false;
+
+    const label = (element) => (
+      element.innerText ||
+      element.value ||
+      element.getAttribute("aria-label") ||
+      element.id ||
+      element.name ||
+      ""
+    ).trim();
+    const candidates = [...document.querySelectorAll("input[type=submit], input[type=button], button, a")]
+      .filter(visible)
+      .filter((element) => !/logout|sign out|cancel|close/i.test(label(element)));
+    const button = candidates.find((element) => /^log\\s*in$|^login$/i.test(label(element))) ||
+      candidates.find((element) => /log\\s*in|login/i.test(label(element)));
+    if (!button) return false;
+    button.click();
+    return true;
+  })()`);
+}
+
 async function loginForCookie(send) {
   usedLogin = true;
   let submittedEmail = false;
   let submittedPassword = false;
+  let lastOpenSessionsLoginAttemptAt = 0;
   let password = "";
 
   log("opening VPN SAML login page");
@@ -308,6 +335,15 @@ async function loginForCookie(send) {
     const body = lastState.body || "";
     if (/incorrect user id or password|incorrect|invalid password|type the correct user id or password/i.test(body)) {
       throw new Error(`login page reported an error: ${body.replace(/\s+/g, " ").slice(0, 220)}`);
+    }
+
+    if (lastState.openSessionsPromptVisible && Date.now() - lastOpenSessionsLoginAttemptAt > 3000) {
+      log("continuing past existing VPN sessions prompt");
+      lastOpenSessionsLoginAttemptAt = Date.now();
+      if (await submitOpenSessionsLogin(send)) {
+        await sleep(1000);
+        continue;
+      }
     }
 
     if (!submittedEmail && lastState.host.includes("microsoftonline.com") && lastState.emailVisible) {

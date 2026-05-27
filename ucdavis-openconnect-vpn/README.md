@@ -95,6 +95,9 @@ Chrome uses a dedicated profile:
 The visible login tab can be closed after a cookie is captured while the profile
 and cookies remain available for later reconnects.
 
+If the VPN gateway reports existing open sessions during login, the browser
+helper leaves those sessions unchecked and clicks `Login` to continue.
+
 ## Security Notes
 
 - Do not commit local config files, cookies, logs, browser profiles, or Keychain

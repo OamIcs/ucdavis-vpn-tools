@@ -226,7 +226,14 @@ async function pageState(send) {
       readyState: document.readyState,
       emailVisible: [...document.querySelectorAll("input[type=email], input#i0116, input[name*=loginfmt], input[name*=email i]")].some(visible),
       passwordVisible: [...document.querySelectorAll("input[type=password], input#i0118")].some(visible),
-      openSessionsPromptVisible: /you have open user sessions|select sessions to close upon log in/i.test(document.body?.innerText || ""),
+      openSessionsPromptVisible: /p=user(?:-|%2d)confirm/i.test(location.href) ||
+        /confirmation open sessions/i.test(document.title) ||
+        !!document.querySelector("#btnContinue, input[name=btnContinue]") ||
+        /you have open user sessions|select sessions to close upon log in/i.test(document.body?.innerText || ""),
+      maxSessionsPromptVisible: /p=user(?:-|%2d)max(?:-|%2d)session/i.test(location.href) ||
+        /maximum concurrent.*session|exceeded maximum concurrent/i.test(document.body?.innerText || ""),
+      emptyAssertionPromptVisible: /p=empty(?:-|%2d)assertion/i.test(location.href) ||
+        /no assertion received/i.test(document.body?.innerText || ""),
       buttons: [...document.querySelectorAll("input[type=submit], button")].filter(visible).slice(0, 8).map(label),
       body: document.body ? document.body.innerText.slice(0, 800) : ""
     };
@@ -289,7 +296,11 @@ async function submitOpenSessionsLogin(send) {
   return await evalPage(send, `(() => {
     const visible = (element) => !!(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
     const body = document.body?.innerText || "";
-    if (!/you have open user sessions|select sessions to close upon log in/i.test(body)) return false;
+    const isOpenSessionsPrompt = /p=user(?:-|%2d)confirm/i.test(location.href) ||
+      /confirmation open sessions/i.test(document.title) ||
+      !!document.querySelector("#btnContinue, input[name=btnContinue]") ||
+      /you have open user sessions|select sessions to close upon log in/i.test(body);
+    if (!isOpenSessionsPrompt) return false;
 
     const label = (element) => (
       element.innerText ||
@@ -299,13 +310,44 @@ async function submitOpenSessionsLogin(send) {
       element.name ||
       ""
     ).trim();
+    const primary = document.querySelector("#btnContinue, input[name=btnContinue]");
     const candidates = [...document.querySelectorAll("input[type=submit], input[type=button], button, a")]
       .filter(visible)
-      .filter((element) => !/logout|sign out|cancel|close/i.test(label(element)));
-    const button = candidates.find((element) => /^log\\s*in$|^login$/i.test(label(element))) ||
+      .filter((element) => !/logout|sign out|cancel/i.test(label(element)));
+    const button = primary ||
+      candidates.find((element) => /^log\\s*in$|^login$/i.test(label(element))) ||
       candidates.find((element) => /log\\s*in|login/i.test(label(element)));
     if (!button) return false;
-    button.click();
+    if (button.form?.requestSubmit) button.form.requestSubmit(button);
+    else button.click();
+    return true;
+  })()`);
+}
+
+async function submitIvantiSignIn(send) {
+  return await evalPage(send, `(() => {
+    const visible = (element) => !!(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+    const body = document.body?.innerText || "";
+    const isIvantiSignInPrompt = /p=user(?:-|%2d)max(?:-|%2d)session/i.test(location.href) ||
+      /p=empty(?:-|%2d)assertion/i.test(location.href) ||
+      /maximum concurrent.*session|exceeded maximum concurrent|no assertion received/i.test(body);
+    if (!isIvantiSignInPrompt) return false;
+
+    const label = (element) => (
+      element.innerText ||
+      element.value ||
+      element.getAttribute("aria-label") ||
+      element.id ||
+      element.name ||
+      ""
+    ).trim();
+    const candidates = [...document.querySelectorAll("#btnSubmit_6, button[name=btnSubmit], button[type=submit], input[type=submit], button")]
+      .filter(visible)
+      .filter((element) => !/dismiss|cancel|logout|sign out/i.test(label(element)));
+    const button = candidates.find((element) => /sign\\s*in|login|log\\s*in/i.test(label(element))) || candidates[0];
+    if (!button) return false;
+    if (button.form?.requestSubmit) button.form.requestSubmit(button);
+    else button.click();
     return true;
   })()`);
 }
@@ -315,6 +357,7 @@ async function loginForCookie(send) {
   let submittedEmail = false;
   let submittedPassword = false;
   let lastOpenSessionsLoginAttemptAt = 0;
+  let ivantiSignInAttempts = 0;
   let password = "";
 
   log("opening VPN SAML login page");
@@ -335,6 +378,20 @@ async function loginForCookie(send) {
     const body = lastState.body || "";
     if (/incorrect user id or password|incorrect|invalid password|type the correct user id or password/i.test(body)) {
       throw new Error(`login page reported an error: ${body.replace(/\s+/g, " ").slice(0, 220)}`);
+    }
+
+    if (lastState.maxSessionsPromptVisible || lastState.emptyAssertionPromptVisible) {
+      if (ivantiSignInAttempts >= 3) {
+        throw new Error("VPN gateway keeps returning Ivanti sign-in recovery pages; close an existing VPN session manually and retry");
+      }
+      log(lastState.maxSessionsPromptVisible ? "retrying sign-in after maximum sessions page" : "retrying sign-in after empty assertion page");
+      ivantiSignInAttempts += 1;
+      if (await submitIvantiSignIn(send)) {
+        submittedEmail = false;
+        submittedPassword = false;
+        await sleep(1000);
+        continue;
+      }
     }
 
     if (lastState.openSessionsPromptVisible && Date.now() - lastOpenSessionsLoginAttemptAt > 3000) {

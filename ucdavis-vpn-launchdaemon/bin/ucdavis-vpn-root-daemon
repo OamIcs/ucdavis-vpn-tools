@@ -683,6 +683,9 @@ handle_control_command() {
     disconnect)
       command_disconnect
       ;;
+    logout)
+      command_logout
+      ;;
     pause)
       command_pause
       ;;
@@ -963,8 +966,8 @@ command_connect() {
       log "VPN reconnect is blocked by the browser session attempt limit; run '$PROGRAM_NAME connect' after manual recovery."
       return "$BROWSER_SESSION_BLOCK_RC"
     fi
-    log "OpenConnect is running as pid $pid, but the ping target is not reachable; reconnecting."
-    signal_tracked_openconnect HUP
+    log "OpenConnect is running as pid $pid, but the ping target is not reachable; logging out before reconnecting."
+    signal_tracked_openconnect TERM
     sleep 2
   fi
 
@@ -1031,8 +1034,8 @@ command_resume() {
 command_disable() {
   require_root
   set_auto_reconnect_paused "manual disable"
-  signal_tracked_openconnect HUP
-  log "Disabled automatic reconnect and disconnected tracked OpenConnect."
+  signal_tracked_openconnect TERM
+  log "Disabled automatic reconnect and logged out tracked OpenConnect."
 }
 
 command_enable() {
@@ -1164,8 +1167,8 @@ monitor_once() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
     if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
-      log "Tracked OpenConnect is running but ping failed; sending SIGHUP before reconnect."
-      signal_tracked_openconnect HUP
+      log "Tracked OpenConnect is running but ping failed; sending SIGTERM before reconnect."
+      signal_tracked_openconnect TERM
     fi
   fi
   command_connect

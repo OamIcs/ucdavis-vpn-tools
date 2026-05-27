@@ -145,6 +145,7 @@ ucdavis-vpnctl status
 ucdavis-vpnctl doctor
 ucdavis-vpnctl connect
 ucdavis-vpnctl disconnect
+ucdavis-vpnctl logout
 ucdavis-vpnctl off
 ucdavis-vpnctl on
 ```
@@ -172,7 +173,10 @@ ucdavis-vpnctl connect
 # Disconnect the tunnel but leave automatic reconnect enabled.
 ucdavis-vpnctl disconnect
 
-# Pause automatic reconnect and disconnect the tunnel.
+# Log out the tunnel but leave automatic reconnect enabled.
+ucdavis-vpnctl logout
+
+# Pause automatic reconnect and log out the tunnel.
 ucdavis-vpnctl off
 
 # Resume automatic reconnect and connect now.

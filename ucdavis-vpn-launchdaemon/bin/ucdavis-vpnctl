@@ -42,9 +42,10 @@ No-sudo commands:
   doctor       Print dependency and config checks.
   connect      Clear retry block and connect now.
   disconnect   Disconnect the tunnel, leaving auto reconnect enabled.
+  logout       Log out the tunnel session, leaving auto reconnect enabled.
   pause        Pause automatic reconnect.
   resume       Resume automatic reconnect.
-  off|disable  Pause automatic reconnect and disconnect.
+  off|disable  Pause automatic reconnect and log out the tunnel.
   on|enable    Resume automatic reconnect and connect now.
   once         Ask the daemon to run one monitor pass.
 
@@ -118,7 +119,7 @@ case "$COMMAND" in
   status|doctor)
     "$ROOT_DAEMON_BIN" --config "$CONFIG_FILE" "$COMMAND"
     ;;
-  connect|disconnect|pause|resume|once)
+  connect|disconnect|logout|pause|resume|once)
     send_control_request "$COMMAND"
     ;;
   off|disable)

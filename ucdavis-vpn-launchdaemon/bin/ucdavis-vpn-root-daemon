@@ -49,6 +49,7 @@ PING_TARGET="${PING_TARGET:-}"
 PING_COUNT="${PING_COUNT:-2}"
 PING_TIMEOUT_MS="${PING_TIMEOUT_MS:-1500}"
 SSH_CONFIG_TIMEOUT_SECONDS="${SSH_CONFIG_TIMEOUT_SECONDS:-5}"
+ROUTE_LOOKUP_TIMEOUT_SECONDS="${ROUTE_LOOKUP_TIMEOUT_SECONDS:-5}"
 CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-60}"
 FAILURE_THRESHOLD="${FAILURE_THRESHOLD:-2}"
 RECONNECT_COOLDOWN_SECONDS="${RECONNECT_COOLDOWN_SECONDS:-180}"
@@ -67,6 +68,7 @@ VPN_ROUTE_PING_TARGET="${VPN_ROUTE_PING_TARGET:-1}"
 NETWORK_CHANGE_DETECT="${NETWORK_CHANGE_DETECT:-1}"
 NETWORK_CHANGE_SETTLE_SECONDS="${NETWORK_CHANGE_SETTLE_SECONDS:-3}"
 NETWORK_CHANGE_BYPASS_COOLDOWN="${NETWORK_CHANGE_BYPASS_COOLDOWN:-1}"
+[[ "$ROUTE_LOOKUP_TIMEOUT_SECONDS" == <-> ]] || ROUTE_LOOKUP_TIMEOUT_SECONDS=5
 [[ "$NETWORK_CHANGE_SETTLE_SECONDS" == <-> ]] || NETWORK_CHANGE_SETTLE_SECONDS=3
 [[ "$NETWORK_CHANGE_BYPASS_COOLDOWN" == <-> ]] || NETWORK_CHANGE_BYPASS_COOLDOWN=1
 
@@ -279,14 +281,21 @@ router_for_device() {
   '
 }
 
+route_get() {
+  local destination="$1"
+  [[ -n "$destination" ]] || return 1
+  /usr/bin/perl -e 'alarm shift; exec @ARGV' \
+    "$ROUTE_LOOKUP_TIMEOUT_SECONDS" /sbin/route -n get "$destination" 2>/dev/null
+}
+
 default_route_info() {
   local fallback_iface="${1:-}"
   local route_info
-  route_info="$(/sbin/route -n get default 2>/dev/null | /usr/bin/awk '
+  route_info="$(route_get default | /usr/bin/awk '
     /gateway:/ { gateway=$2 }
     /interface:/ { iface=$2 }
     END { if (gateway || iface) print gateway "|" iface }
-  ')"
+  ' || true)"
   if [[ -n "$route_info" ]]; then
     print -r -- "$route_info"
     return 0
@@ -518,7 +527,7 @@ route_uses_iface() {
   local destination="$1"
   local expected_iface="$2"
   [[ -n "$destination" && -n "$expected_iface" ]] || return 1
-  /sbin/route -n get "$destination" 2>/dev/null | /usr/bin/awk -v expected="$expected_iface" '
+  route_get "$destination" | /usr/bin/awk -v expected="$expected_iface" '
     /interface:/ { iface=$2 }
     END { exit iface == expected ? 0 : 1 }
   '
@@ -614,7 +623,7 @@ ensure_vpn_split_routes() {
 }
 
 vpn_server_route_info() {
-  /sbin/route -n get "$SERVER" 2>/dev/null | /usr/bin/awk '
+  route_get "$SERVER" | /usr/bin/awk '
     /route to:/ { route=$3 }
     /gateway:/ { gateway=$2 }
     /interface:/ { iface=$2 }
@@ -641,7 +650,7 @@ repair_stale_vpn_server_route() {
   local default_gateway="${default_parts[1]:-}"
   local default_iface="${default_parts[2]:-}"
 
-  if ! /sbin/route -n get default >/dev/null 2>&1 && [[ -n "$default_gateway" ]]; then
+  if ! route_get default >/dev/null 2>&1 && [[ -n "$default_gateway" ]]; then
     log "Default route is missing; restoring default via $default_gateway on $default_iface."
     /sbin/route -n add default "$default_gateway" >/dev/null 2>&1 ||
       /sbin/route -n change default "$default_gateway" >/dev/null 2>&1 ||
@@ -1248,13 +1257,13 @@ command_status() {
   fi
   target_route_status="not checked"
   if [[ -n "$target" ]]; then
-    target_route_status="$(/sbin/route -n get "$target" 2>/dev/null | /usr/bin/awk '
+    target_route_status="$(route_get "$target" | /usr/bin/awk '
       /gateway:/ { gateway=$2 }
       /interface:/ { iface=$2 }
       END {
         if (gateway || iface) print (gateway ? gateway : "direct") " on " (iface ? iface : "unknown")
       }
-    ')"
+    ' || true)"
     [[ -n "$target_route_status" ]] || target_route_status="not found"
   fi
   ip="$(vpn_internal_ip || true)"

@@ -94,6 +94,7 @@ ensure_config_default NETWORK_CHANGE_DETECT 1
 ensure_config_default NETWORK_CHANGE_SETTLE_SECONDS 3
 ensure_config_default NETWORK_CHANGE_BYPASS_COOLDOWN 1
 ensure_config_default SSH_CONFIG_TIMEOUT_SECONDS 5
+ensure_config_default ROUTE_LOOKUP_TIMEOUT_SECONDS 5
 ensure_config_default CLOSE_EXISTING_VPN_SESSIONS 1
 if /usr/bin/grep -q '^MAX_BROWSER_SESSION_ATTEMPTS=3$' "$CONFIG_FILE"; then
   /usr/bin/sed -i '' 's/^MAX_BROWSER_SESSION_ATTEMPTS=3$/MAX_BROWSER_SESSION_ATTEMPTS=2/' "$CONFIG_FILE"

@@ -62,6 +62,8 @@ MAX_BROWSER_SESSION_ATTEMPTS="${MAX_BROWSER_SESSION_ATTEMPTS:-2}"
 PRESERVE_DEFAULT_ROUTE="${PRESERVE_DEFAULT_ROUTE:-1}"
 DEFAULT_ROUTE_RESTORE_DELAY_SECONDS="${DEFAULT_ROUTE_RESTORE_DELAY_SECONDS:-2}"
 [[ "$DEFAULT_ROUTE_RESTORE_DELAY_SECONDS" == <-> ]] || DEFAULT_ROUTE_RESTORE_DELAY_SECONDS=2
+VPN_SPLIT_ROUTES="${VPN_SPLIT_ROUTES:-169.237.0.0/16 128.120.0.0/16}"
+VPN_ROUTE_PING_TARGET="${VPN_ROUTE_PING_TARGET:-1}"
 
 STATE_DIR="${STATE_DIR:-/var/run/ucdavis-openconnect-daemon}"
 DB_DIR="${DB_DIR:-/var/db/ucdavis-openconnect-daemon}"
@@ -424,11 +426,112 @@ route_guard_tick() {
     local iface="${parts[2]:-}"
     if [[ -n "$iface" ]] && ! is_tunnel_iface "$iface"; then
       remember_physical_default_route "$current" >/dev/null 2>&1 || true
+      ensure_vpn_split_routes "monitor"
       return 0
     fi
   fi
 
   restore_default_route "" "monitor detected VPN-owned or missing default route" >/dev/null 2>&1 || true
+  ensure_vpn_split_routes "monitor"
+}
+
+route_uses_iface() {
+  local destination="$1"
+  local expected_iface="$2"
+  [[ -n "$destination" && -n "$expected_iface" ]] || return 1
+  /sbin/route -n get "$destination" 2>/dev/null | /usr/bin/awk -v expected="$expected_iface" '
+    /interface:/ { iface=$2 }
+    END { exit iface == expected ? 0 : 1 }
+  '
+}
+
+add_net_route_via_vpn() {
+  local route="$1"
+  local iface="$2"
+  local context="${3:-route guard}"
+  [[ -n "$route" && -n "$iface" ]] || return 0
+
+  local probe="${route%%/*}"
+  if route_uses_iface "$probe" "$iface"; then
+    return 0
+  fi
+
+  log "Routing VPN split net $route via $iface ($context)."
+  /sbin/route -n add -net "$route" -interface "$iface" >/dev/null 2>&1 ||
+    /sbin/route -n change -net "$route" -interface "$iface" >/dev/null 2>&1 ||
+    true
+}
+
+add_host_route_via_vpn() {
+  local host="$1"
+  local iface="$2"
+  local context="${3:-route guard}"
+  [[ -n "$host" && -n "$iface" ]] || return 0
+
+  if route_uses_iface "$host" "$iface"; then
+    return 0
+  fi
+
+  log "Routing VPN target host $host via $iface ($context)."
+  /sbin/route -n add -host "$host" -interface "$iface" >/dev/null 2>&1 ||
+    /sbin/route -n change -host "$host" -interface "$iface" >/dev/null 2>&1 ||
+    true
+}
+
+ensure_vpn_server_physical_route() {
+  local context="${1:-route guard}"
+  local server_info physical_info
+  server_info="$(vpn_server_route_info || true)"
+  physical_info="$(saved_physical_default_route_info || true)"
+  [[ -n "$server_info" && -n "$physical_info" ]] || return 0
+
+  local -a server_parts physical_parts
+  server_parts=("${(@ps:|:)server_info}")
+  physical_parts=("${(@ps:|:)physical_info}")
+  local server_ip="${server_parts[1]:-}"
+  local physical_gateway="${physical_parts[1]:-}"
+  local physical_iface="${physical_parts[2]:-}"
+  [[ -n "$server_ip" && -n "$physical_gateway" && -n "$physical_iface" ]] || return 0
+
+  if [[ "${server_parts[2]:-}" == "$physical_gateway" && "${server_parts[3]:-}" == "$physical_iface" ]]; then
+    return 0
+  fi
+
+  log "Keeping VPN gateway $server_ip via $physical_gateway on $physical_iface ($context)."
+  /sbin/route -n add -host "$server_ip" "$physical_gateway" >/dev/null 2>&1 ||
+    /sbin/route -n change -host "$server_ip" "$physical_gateway" >/dev/null 2>&1 ||
+    true
+}
+
+ensure_vpn_split_routes() {
+  local context="${1:-route guard}"
+  local vpn_info
+  vpn_info="$(vpn_internal_ip || true)"
+  [[ -n "$vpn_info" ]] || return 0
+
+  local -a vpn_parts
+  vpn_parts=("${(@s: :)vpn_info}")
+  local vpn_iface="${vpn_parts[1]:-}"
+  [[ -n "$vpn_iface" ]] || return 0
+
+  ensure_vpn_server_physical_route "$context"
+
+  local route
+  for route in ${=VPN_SPLIT_ROUTES}; do
+    add_net_route_via_vpn "$route" "$vpn_iface" "$context"
+  done
+
+  if [[ "$VPN_ROUTE_PING_TARGET" == "1" ]]; then
+    local target server_info server_ip
+    target="$(resolve_ping_target || true)"
+    server_info="$(vpn_server_route_info || true)"
+    local -a server_parts
+    server_parts=("${(@ps:|:)server_info}")
+    server_ip="${server_parts[1]:-}"
+    if [[ -n "$target" && "$target" != "$server_ip" ]]; then
+      add_host_route_via_vpn "$target" "$vpn_iface" "$context"
+    fi
+  fi
 }
 
 vpn_server_route_info() {
@@ -944,6 +1047,7 @@ start_openconnect_with_cookie() {
     sleep "$DEFAULT_ROUTE_RESTORE_DELAY_SECONDS"
     restore_default_route "$physical_default" "after OpenConnect route script" >/dev/null 2>&1 || true
   fi
+  ensure_vpn_split_routes "after OpenConnect route script"
   return 0
 }
 
@@ -1051,7 +1155,7 @@ command_enable() {
 }
 
 command_status() {
-  local target ping_status ip any cookie_summary
+  local target ping_status target_route_status ip any cookie_summary
   target="$(resolve_ping_target || true)"
   if [[ -n "$target" ]] && ping_target_ok "$target"; then
     ping_status="OK ($target)"
@@ -1059,6 +1163,17 @@ command_status() {
     ping_status="FAIL ($target)"
   else
     ping_status="not checked"
+  fi
+  target_route_status="not checked"
+  if [[ -n "$target" ]]; then
+    target_route_status="$(/sbin/route -n get "$target" 2>/dev/null | /usr/bin/awk '
+      /gateway:/ { gateway=$2 }
+      /interface:/ { iface=$2 }
+      END {
+        if (gateway || iface) print (gateway ? gateway : "direct") " on " (iface ? iface : "unknown")
+      }
+    ')"
+    [[ -n "$target_route_status" ]] || target_route_status="not found"
   fi
   ip="$(vpn_internal_ip || true)"
   [[ -n "$ip" ]] || ip="not found"
@@ -1094,6 +1209,7 @@ command_status() {
   print "Tracked:      $(tracked_pid_status)"
   print "VPN IP:       $ip"
   print "Ping:         $ping_status"
+  print "Ping route:   $target_route_status"
   print "Default route: $current_default_status"
   print "Auto:         $(auto_reconnect_status)"
   print "Browser tries: $(browser_session_budget_status)"

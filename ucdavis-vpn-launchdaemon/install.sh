@@ -88,6 +88,8 @@ ensure_config_default MAX_BROWSER_SESSION_ATTEMPTS 2
 ensure_config_default CONTROL_POLL_SECONDS 1
 ensure_config_default PRESERVE_DEFAULT_ROUTE 1
 ensure_config_default DEFAULT_ROUTE_RESTORE_DELAY_SECONDS 2
+ensure_config_default VPN_SPLIT_ROUTES '"169.237.0.0/16 128.120.0.0/16"'
+ensure_config_default VPN_ROUTE_PING_TARGET 1
 ensure_config_default SSH_CONFIG_TIMEOUT_SECONDS 5
 ensure_config_default CLOSE_EXISTING_VPN_SESSIONS 1
 if /usr/bin/grep -q '^MAX_BROWSER_SESSION_ATTEMPTS=3$' "$CONFIG_FILE"; then

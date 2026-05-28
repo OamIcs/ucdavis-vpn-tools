@@ -101,6 +101,8 @@ MAX_BROWSER_SESSION_ATTEMPTS=2
 CONTROL_POLL_SECONDS=1
 PRESERVE_DEFAULT_ROUTE=1
 DEFAULT_ROUTE_RESTORE_DELAY_SECONDS=2
+VPN_SPLIT_ROUTES="169.237.0.0/16 128.120.0.0/16"
+VPN_ROUTE_PING_TARGET=1
 CLOSE_EXISTING_VPN_SESSIONS=1
 AUTO_RECONNECT=1
 CONNECT_ON_START=1
@@ -122,6 +124,10 @@ block and starts a fresh attempt:
 `PRESERVE_DEFAULT_ROUTE=1` keeps the macOS default route on the physical network
 after OpenConnect starts. This prevents the VPN route script from temporarily
 turning the tunnel into the machine-wide default internet path.
+`VPN_SPLIT_ROUTES` lists campus routes that should still go through the VPN
+tunnel while the default route stays on the physical network. `VPN_ROUTE_PING_TARGET=1`
+also pins the resolved ping target, such as an SSH alias host, through the
+tunnel.
 `CLOSE_EXISTING_VPN_SESSIONS=1` tells the browser helper to select existing VPN
 web sessions for closure on the Ivanti open-sessions page before continuing.
 

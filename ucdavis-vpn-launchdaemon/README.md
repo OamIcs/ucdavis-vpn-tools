@@ -103,6 +103,9 @@ PRESERVE_DEFAULT_ROUTE=1
 DEFAULT_ROUTE_RESTORE_DELAY_SECONDS=2
 VPN_SPLIT_ROUTES="169.237.0.0/16 128.120.0.0/16"
 VPN_ROUTE_PING_TARGET=1
+NETWORK_CHANGE_DETECT=1
+NETWORK_CHANGE_SETTLE_SECONDS=3
+NETWORK_CHANGE_BYPASS_COOLDOWN=1
 CLOSE_EXISTING_VPN_SESSIONS=1
 AUTO_RECONNECT=1
 CONNECT_ON_START=1
@@ -128,6 +131,10 @@ turning the tunnel into the machine-wide default internet path.
 tunnel while the default route stays on the physical network. `VPN_ROUTE_PING_TARGET=1`
 also pins the resolved ping target, such as an SSH alias host, through the
 tunnel.
+`NETWORK_CHANGE_DETECT=1` makes the daemon watch the physical default route and
+Wi-Fi network name during its sleep loop. When they change, it repairs stale
+routes, waits `NETWORK_CHANGE_SETTLE_SECONDS`, and checks/reconnects the VPN
+without waiting for the normal monitor interval or cooldown.
 `CLOSE_EXISTING_VPN_SESSIONS=1` tells the browser helper to select existing VPN
 web sessions for closure on the Ivanti open-sessions page before continuing.
 

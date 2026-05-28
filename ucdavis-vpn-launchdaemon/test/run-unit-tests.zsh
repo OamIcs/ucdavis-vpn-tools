@@ -43,6 +43,9 @@ MAX_BROWSER_SESSION_ATTEMPTS=2
 CONTROL_POLL_SECONDS=1
 PRESERVE_DEFAULT_ROUTE=1
 DEFAULT_ROUTE_RESTORE_DELAY_SECONDS=0
+NETWORK_CHANGE_DETECT=1
+NETWORK_CHANGE_SETTLE_SECONDS=0
+NETWORK_CHANGE_BYPASS_COOLDOWN=1
 AUTO_RECONNECT=1
 CONNECT_ON_START=0
 STATE_DIR=$TMP_DIR/state
@@ -85,6 +88,14 @@ if remember_physical_default_route "172.25.228.1|utun6" >/dev/null 2>&1; then
   fail "tunnel default route should not be saved as physical"
 fi
 assert_eq "192.0.2.1|en0" "$(saved_physical_default_route_info)" "tunnel route should not replace saved physical route"
+
+initialize_network_signature
+[[ -f "$NETWORK_SIGNATURE_FILE" ]] || fail "network signature file should be initialized"
+print -r -- "old-gateway|en0|ssid=old" > "$NETWORK_SIGNATURE_FILE"
+detect_network_change >/dev/null 2>&1 || fail "network signature change should be detected"
+[[ -f "$NETWORK_CHANGE_PENDING_FILE" ]] || fail "network change should create a pending marker"
+network_change_summary="$(consume_network_change_pending)"
+[[ "$network_change_summary" == old-gateway* ]] || fail "network change summary should mention old signature"
 
 status_output="$("$ROOT_DIR/bin/ucdavis-vpnctl" --config "$CONFIG_FILE" status)"
 print -r -- "$status_output" | /usr/bin/grep -q "Browser tries:" || fail "ctl status should include browser budget"

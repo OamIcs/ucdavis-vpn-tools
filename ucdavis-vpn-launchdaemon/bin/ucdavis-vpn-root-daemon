@@ -64,6 +64,11 @@ DEFAULT_ROUTE_RESTORE_DELAY_SECONDS="${DEFAULT_ROUTE_RESTORE_DELAY_SECONDS:-2}"
 [[ "$DEFAULT_ROUTE_RESTORE_DELAY_SECONDS" == <-> ]] || DEFAULT_ROUTE_RESTORE_DELAY_SECONDS=2
 VPN_SPLIT_ROUTES="${VPN_SPLIT_ROUTES:-169.237.0.0/16 128.120.0.0/16}"
 VPN_ROUTE_PING_TARGET="${VPN_ROUTE_PING_TARGET:-1}"
+NETWORK_CHANGE_DETECT="${NETWORK_CHANGE_DETECT:-1}"
+NETWORK_CHANGE_SETTLE_SECONDS="${NETWORK_CHANGE_SETTLE_SECONDS:-3}"
+NETWORK_CHANGE_BYPASS_COOLDOWN="${NETWORK_CHANGE_BYPASS_COOLDOWN:-1}"
+[[ "$NETWORK_CHANGE_SETTLE_SECONDS" == <-> ]] || NETWORK_CHANGE_SETTLE_SECONDS=3
+[[ "$NETWORK_CHANGE_BYPASS_COOLDOWN" == <-> ]] || NETWORK_CHANGE_BYPASS_COOLDOWN=1
 
 STATE_DIR="${STATE_DIR:-/var/run/ucdavis-openconnect-daemon}"
 DB_DIR="${DB_DIR:-/var/db/ucdavis-openconnect-daemon}"
@@ -72,6 +77,8 @@ PID_FILE="${PID_FILE:-$STATE_DIR/openconnect.pid}"
 COOKIE_META_FILE="${COOKIE_META_FILE:-$DB_DIR/cookie-meta.json}"
 RUN_LOCK_DIR="${RUN_LOCK_DIR:-$DB_DIR/run.lock}"
 PHYSICAL_DEFAULT_ROUTE_FILE="${PHYSICAL_DEFAULT_ROUTE_FILE:-$STATE_DIR/physical-default-route}"
+NETWORK_SIGNATURE_FILE="${NETWORK_SIGNATURE_FILE:-$STATE_DIR/network-signature}"
+NETWORK_CHANGE_PENDING_FILE="${NETWORK_CHANGE_PENDING_FILE:-$STATE_DIR/network-change.pending}"
 BROWSER_SESSION_ATTEMPTS_FILE="${BROWSER_SESSION_ATTEMPTS_FILE:-$STATE_DIR/browser-session-attempts}"
 BROWSER_SESSION_BLOCK_FILE="${BROWSER_SESSION_BLOCK_FILE:-$STATE_DIR/browser-session.blocked}"
 AUTO_RECONNECT_PAUSE_FILE="${AUTO_RECONNECT_PAUSE_FILE:-$STATE_DIR/auto-reconnect.paused}"
@@ -348,6 +355,76 @@ primary_physical_default_route_info() {
   physical_route_from_interface "$iface"
 }
 
+wifi_network_name_for_device() {
+  local device="$1"
+  [[ -n "$device" ]] || return 1
+  /usr/sbin/networksetup -getairportnetwork "$device" 2>/dev/null |
+    /usr/bin/sed -n 's/^Current Wi-Fi Network: //p'
+}
+
+network_signature() {
+  local info iface ssid
+  info="$(primary_physical_default_route_info || default_route_info || true)"
+  [[ -n "$info" ]] || info="none|none"
+  local -a parts
+  parts=("${(@ps:|:)info}")
+  iface="${parts[2]:-}"
+  ssid=""
+  if [[ -n "$iface" ]]; then
+    ssid="$(wifi_network_name_for_device "$iface" || true)"
+  fi
+  print -r -- "$info|ssid=${ssid:-unknown}"
+}
+
+initialize_network_signature() {
+  [[ "$NETWORK_CHANGE_DETECT" == "1" ]] || return 0
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  network_signature > "$NETWORK_SIGNATURE_FILE" 2>/dev/null || true
+  rm -f "$NETWORK_CHANGE_PENDING_FILE" 2>/dev/null || true
+}
+
+mark_network_change_pending() {
+  local old_signature="$1"
+  local new_signature="$2"
+  {
+    print "changed_at=$(timestamp)"
+    print "old=$old_signature"
+    print "new=$new_signature"
+  } > "$NETWORK_CHANGE_PENDING_FILE"
+}
+
+detect_network_change() {
+  [[ "$NETWORK_CHANGE_DETECT" == "1" ]] || return 1
+  local old_signature new_signature
+  new_signature="$(network_signature || true)"
+  [[ -n "$new_signature" ]] || new_signature="none|none|ssid=unknown"
+
+  if [[ ! -f "$NETWORK_SIGNATURE_FILE" ]]; then
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    print -r -- "$new_signature" > "$NETWORK_SIGNATURE_FILE"
+    return 1
+  fi
+
+  old_signature="$(<"$NETWORK_SIGNATURE_FILE")"
+  if [[ "$new_signature" == "$old_signature" ]]; then
+    return 1
+  fi
+
+  print -r -- "$new_signature" > "$NETWORK_SIGNATURE_FILE"
+  log "Network changed: ${old_signature:-unknown} -> ${new_signature:-unknown}."
+  mark_network_change_pending "${old_signature:-unknown}" "$new_signature"
+  return 0
+}
+
+consume_network_change_pending() {
+  [[ -f "$NETWORK_CHANGE_PENDING_FILE" ]] || return 1
+  local old_signature new_signature
+  old_signature="$(/usr/bin/awk -F= '$1 == "old" { print substr($0, 5); exit }' "$NETWORK_CHANGE_PENDING_FILE" 2>/dev/null || true)"
+  new_signature="$(/usr/bin/awk -F= '$1 == "new" { print substr($0, 5); exit }' "$NETWORK_CHANGE_PENDING_FILE" 2>/dev/null || true)"
+  rm -f "$NETWORK_CHANGE_PENDING_FILE"
+  print -r -- "${old_signature:-unknown} -> ${new_signature:-unknown}"
+}
+
 remember_physical_default_route() {
   [[ "$PRESERVE_DEFAULT_ROUTE" == "1" ]] || return 0
   local info="${1:-}"
@@ -417,6 +494,8 @@ restore_default_route() {
 
 route_guard_tick() {
   [[ "$PRESERVE_DEFAULT_ROUTE" == "1" ]] || return 0
+
+  repair_stale_vpn_server_route
 
   local current
   current="$(default_route_info || true)"
@@ -840,6 +919,9 @@ sleep_with_control() {
   local slice
   while (( remaining > 0 )); do
     process_control_requests
+    if [[ -f "$NETWORK_CHANGE_PENDING_FILE" ]] || detect_network_change >/dev/null 2>&1; then
+      return 0
+    fi
     slice="$CONTROL_POLL_SECONDS"
     (( slice > remaining )) && slice="$remaining"
     sleep "$slice"
@@ -1299,6 +1381,7 @@ command_run() {
   require_root
   acquire_run_lock
   setup_control_dir
+  initialize_network_signature
   log "Starting daemon loop. interval=${CHECK_INTERVAL_SECONDS}s threshold=$FAILURE_THRESHOLD auto=$AUTO_RECONNECT connect_on_start=$CONNECT_ON_START"
   local failures=0
   local last_attempt=0
@@ -1329,8 +1412,20 @@ command_run() {
   fi
 
   while true; do
-    local target now
+    local target now network_change_summary network_changed
     process_control_requests
+    detect_network_change >/dev/null 2>&1 || true
+    network_change_summary="$(consume_network_change_pending || true)"
+    network_changed=0
+    if [[ -n "$network_change_summary" ]]; then
+      network_changed=1
+      failures=0
+      log "Network change detected; repairing routes before VPN check ($network_change_summary)."
+      if (( NETWORK_CHANGE_SETTLE_SECONDS > 0 )); then
+        sleep "$NETWORK_CHANGE_SETTLE_SECONDS"
+      fi
+      repair_stale_vpn_server_route
+    fi
     route_guard_tick
     target="$(resolve_ping_target || true)"
     if vpn_session_ok "$target"; then
@@ -1352,11 +1447,17 @@ command_run() {
       fi
       blocked_logged=0
       failures=$((failures + 1))
+      if (( network_changed == 1 )); then
+        failures="$FAILURE_THRESHOLD"
+      fi
       log "Monitor failure $failures/$FAILURE_THRESHOLD for ${target:-unresolved target}"
       now="$(date +%s)"
       if [[ "$AUTO_RECONNECT" == "1" ]] &&
          (( failures >= FAILURE_THRESHOLD )) &&
-         (( now - last_attempt >= RECONNECT_COOLDOWN_SECONDS )); then
+         (( NETWORK_CHANGE_BYPASS_COOLDOWN == 1 && network_changed == 1 || now - last_attempt >= RECONNECT_COOLDOWN_SECONDS )); then
+        if (( network_changed == 1 )); then
+          log "Checking VPN immediately after network change."
+        fi
         if monitor_once; then
           last_attempt="$now"
           failures=0

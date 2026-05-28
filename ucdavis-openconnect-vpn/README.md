@@ -37,18 +37,41 @@ cp config.env.example ~/.config/ucdavis-openconnect-vpn/config.env
 Edit:
 
 ```zsh
-~/.config/ucdavis-openconnect-vpn/config.env
+${EDITOR:-nano} ~/.config/ucdavis-openconnect-vpn/config.env
 ```
 
-At minimum, set:
+At minimum, set your UC Davis email and one reachability target:
 
 ```zsh
 UC_DAVIS_EMAIL=your_email@ucdavis.edu
+SSH_HOST_ALIAS=your-ssh-config-alias
+# or:
+PING_TARGET=internal-host-or-ip
 ```
 
-If you want reachability checks to use an SSH alias, set `SSH_HOST_ALIAS`.
-Otherwise set `PING_TARGET` to an internal host or IP that should only be
-reachable through the VPN.
+Useful config fields:
+
+- `SERVER`: VPN gateway hostname. The default is
+  `vpn.engineering.ucdavis.edu`.
+- `UC_DAVIS_EMAIL`: email submitted to the Microsoft/UC Davis login flow.
+- `KEYCHAIN_SERVICE`: Keychain service name used for the password lookup. Keep
+  this aligned with the `security add-generic-password -s ...` command below.
+- `SSH_HOST_ALIAS`: SSH config alias to resolve with `ssh -G`, such as a host
+  from `~/.ssh/config`.
+- `PING_TARGET`: internal host or IP to ping when no SSH alias is used.
+- `CHROME_PROFILE_DIR`: dedicated Chrome profile for VPN login cookies.
+- `CLOSE_WINDOW_AFTER_COOKIE`: close the visible Chrome login tab after a VPN
+  cookie is captured.
+- `OPENCONNECT_BIN` and `VPNC_SCRIPT`: Homebrew OpenConnect paths. On Apple
+  Silicon Homebrew, the defaults under `/opt/homebrew` are usually correct.
+- `USE_SUDO`: keep `1` for direct user-level `connect`, because OpenConnect
+  needs elevated privileges to create the tunnel interface.
+
+After editing config, run:
+
+```zsh
+bin/ucdavis-openconnect-vpn doctor
+```
 
 ## Keychain
 

@@ -44,9 +44,15 @@ For the user-level OpenConnect tool:
 
 ```zsh
 cd ucdavis-openconnect-vpn
+mkdir -p ~/.config/ucdavis-openconnect-vpn
 cp config.env.example ~/.config/ucdavis-openconnect-vpn/config.env
+${EDITOR:-nano} ~/.config/ucdavis-openconnect-vpn/config.env
 bin/ucdavis-openconnect-vpn doctor
 ```
+
+In that config, set `UC_DAVIS_EMAIL` and either `SSH_HOST_ALIAS` or
+`PING_TARGET`. The password is not stored in the config file; save it in macOS
+Keychain as described in `ucdavis-openconnect-vpn/README.md`.
 
 For the root OpenConnect daemon:
 
@@ -55,7 +61,9 @@ cd ucdavis-vpn-launchdaemon
 sudo ./install.sh
 ```
 
-Read each project's README before enabling automatic reconnect.
+Read each project's README before enabling automatic reconnect. The root daemon
+has its own installed config at
+`/Library/Application Support/ucdavis-vpn-daemon/config.env`.
 
 ## Safety
 

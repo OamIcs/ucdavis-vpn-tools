@@ -83,9 +83,12 @@ Important settings:
 ```zsh
 UC_DAVIS_EMAIL=your_email@ucdavis.edu
 HEALTH_CHECK_MODE=auto
+HEALTH_MIN_SUCCESS=1
 SSH_HOST_ALIAS=your-internal-host
 PING_TARGET=
+PING_TARGETS=
 TCP_TARGET=
+TCP_TARGETS=
 TCP_PORT=22
 TCP_TIMEOUT_SECONDS=3
 SSH_CONFIG_TIMEOUT_SECONDS=5
@@ -110,12 +113,15 @@ CONNECT_ON_START=1
 ```
 
 `HEALTH_CHECK_MODE` can be `auto`, `ping`, `tcp`, or `tunnel`. `auto` uses
-`TCP_TARGET` if set, otherwise `PING_TARGET` or `SSH_HOST_ALIAS`, otherwise only
-checks that OpenConnect and the `utun` VPN address exist.
-Set `TCP_TARGET=internal-host:22` if ICMP ping is blocked or you prefer checking
-a service port instead of a single ping target. Set `HEALTH_CHECK_MODE=tunnel`
-to avoid configuring any internal host, with the tradeoff that it verifies the
-tunnel is up but not that an internal service is reachable.
+`TCP_TARGETS`/`TCP_TARGET` if set, otherwise `PING_TARGETS`/`PING_TARGET` or
+`SSH_HOST_ALIAS`, otherwise only checks that OpenConnect and the `utun` VPN
+address exist. `HEALTH_MIN_SUCCESS=1` means any one configured target passing
+is enough, so one down internal host will not force a reconnect. Set
+`TCP_TARGETS="host-a:22 host-b:443"` if ICMP ping is blocked or you prefer
+checking service ports instead of a single ping target. Set
+`HEALTH_CHECK_MODE=tunnel` to avoid configuring any internal host, with the
+tradeoff that it verifies the tunnel is up but not that an internal service is
+reachable.
 When `SSH_HOST_ALIAS` is used, `SSH_CONFIG_TIMEOUT_SECONDS` bounds the `ssh -G`
 config lookup so a bad SSH config cannot hang the daemon control loop.
 `ROUTE_LOOKUP_TIMEOUT_SECONDS` bounds macOS route lookups, which can otherwise

@@ -52,7 +52,7 @@ bin/ucdavis-openconnect-vpn set-password
 ```
 
 In that config, set `UC_DAVIS_EMAIL` and choose a health check. You can use
-`PING_TARGET`, `TCP_TARGET`, `SSH_HOST_ALIAS`, or `HEALTH_CHECK_MODE=tunnel`.
+`PING_TARGETS`, `TCP_TARGETS`, `SSH_HOST_ALIAS`, or `HEALTH_CHECK_MODE=tunnel`.
 The password is not stored in the config file; `set-password` saves it in macOS
 Keychain.
 

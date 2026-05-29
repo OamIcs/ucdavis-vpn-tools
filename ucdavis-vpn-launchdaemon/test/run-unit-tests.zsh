@@ -94,6 +94,16 @@ if remember_physical_default_route "172.25.228.1|utun6" >/dev/null 2>&1; then
 fi
 assert_eq "192.0.2.1|en0" "$(saved_physical_default_route_info)" "tunnel route should not replace saved physical route"
 
+PING_TARGET=
+PING_TARGETS="203.0.113.254 127.0.0.1"
+HEALTH_MIN_SUCCESS=1
+health_check_ok || fail "multi-target health should pass when one target answers"
+HEALTH_MIN_SUCCESS=2
+health_check_ok && fail "multi-target health should fail when threshold is unmet"
+HEALTH_MIN_SUCCESS=1
+PING_TARGET=127.0.0.1
+PING_TARGETS=
+
 initialize_network_signature
 [[ -f "$NETWORK_SIGNATURE_FILE" ]] || fail "network signature file should be initialized"
 print -r -- "old-gateway|en0|ssid=old" > "$NETWORK_SIGNATURE_FILE"

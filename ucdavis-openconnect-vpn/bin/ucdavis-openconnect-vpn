@@ -11,13 +11,18 @@ UC_DAVIS_EMAIL="${UC_DAVIS_EMAIL:-}"
 KEYCHAIN_SERVICE="${KEYCHAIN_SERVICE:-ucdavis-openconnect-vpn}"
 SSH_HOST_ALIAS="${SSH_HOST_ALIAS:-}"
 PING_TARGET="${PING_TARGET:-}"
+PING_TARGETS="${PING_TARGETS:-}"
 PING_COUNT="${PING_COUNT:-2}"
 PING_TIMEOUT_MS="${PING_TIMEOUT_MS:-1500}"
 HEALTH_CHECK_MODE="${HEALTH_CHECK_MODE:-auto}"
+HEALTH_MIN_SUCCESS="${HEALTH_MIN_SUCCESS:-1}"
 TCP_TARGET="${TCP_TARGET:-}"
+TCP_TARGETS="${TCP_TARGETS:-}"
 TCP_PORT="${TCP_PORT:-22}"
 TCP_TIMEOUT_SECONDS="${TCP_TIMEOUT_SECONDS:-3}"
 VERIFY_AFTER_CONNECT_SECONDS="${VERIFY_AFTER_CONNECT_SECONDS:-25}"
+[[ "$HEALTH_MIN_SUCCESS" == <-> ]] || HEALTH_MIN_SUCCESS=1
+(( HEALTH_MIN_SUCCESS > 0 )) || HEALTH_MIN_SUCCESS=1
 [[ "$TCP_PORT" == <-> ]] || TCP_PORT=22
 [[ "$TCP_TIMEOUT_SECONDS" == <-> ]] || TCP_TIMEOUT_SECONDS=3
 
@@ -100,6 +105,17 @@ resolve_ping_target() {
   if [[ -n "$SSH_HOST_ALIAS" ]]; then
     ssh -G "$SSH_HOST_ALIAS" 2>/dev/null | awk 'tolower($1) == "hostname" { print $2; exit }'
     return 0
+  fi
+}
+
+ping_health_targets() {
+  local target
+  for target in ${=PING_TARGETS}; do
+    [[ -n "$target" ]] && print -r -- "$target"
+  done
+  [[ -n "$PING_TARGET" ]] && print -r -- "$PING_TARGET"
+  if [[ -z "$PING_TARGETS" && -z "$PING_TARGET" && -n "$SSH_HOST_ALIAS" ]]; then
+    resolve_ping_target
   fi
 }
 
@@ -240,6 +256,18 @@ resolve_tcp_target() {
   split_tcp_target "$host" "$TCP_PORT"
 }
 
+tcp_health_targets() {
+  local target host
+  for target in ${=TCP_TARGETS}; do
+    [[ -n "$target" ]] && split_tcp_target "$target" "$TCP_PORT"
+  done
+  [[ -n "$TCP_TARGET" ]] && split_tcp_target "$TCP_TARGET" "$TCP_PORT"
+  if [[ -z "$TCP_TARGETS" && -z "$TCP_TARGET" ]]; then
+    host="$(resolve_ping_target || true)"
+    [[ -n "$host" ]] && split_tcp_target "$host" "$TCP_PORT"
+  fi
+}
+
 tcp_target_ok() {
   local info="$1"
   local -a parts
@@ -256,9 +284,9 @@ resolved_health_check_mode() {
       print -r -- "$HEALTH_CHECK_MODE"
       ;;
     auto|"")
-      if [[ -n "$TCP_TARGET" ]]; then
+      if [[ -n "$TCP_TARGETS" || -n "$TCP_TARGET" ]]; then
         print tcp
-      elif [[ -n "$PING_TARGET" || -n "$SSH_HOST_ALIAS" ]]; then
+      elif [[ -n "$PING_TARGETS" || -n "$PING_TARGET" || -n "$SSH_HOST_ALIAS" ]]; then
         print ping
       else
         print tunnel
@@ -271,22 +299,20 @@ resolved_health_check_mode() {
 }
 
 health_check_description() {
-  local mode target info
+  local mode targets info
   mode="$(resolved_health_check_mode)"
   case "$mode" in
     ping)
-      target="$(resolve_ping_target || true)"
-      print -r -- "ping ${target:-unresolved}"
+      targets="$(ping_health_targets | paste -sd, - 2>/dev/null || true)"
+      print -r -- "ping ${targets:-unresolved} (min $HEALTH_MIN_SUCCESS)"
       ;;
     tcp)
-      info="$(resolve_tcp_target || true)"
-      if [[ -n "$info" ]]; then
+      targets="$(tcp_health_targets | while IFS= read -r info; do
         local -a parts
         parts=("${(@ps:|:)info}")
-        print -r -- "tcp ${parts[1]:-unresolved}:${parts[2]:-$TCP_PORT}"
-      else
-        print -r -- "tcp unresolved:$TCP_PORT"
-      fi
+        print -r -- "${parts[1]:-unresolved}:${parts[2]:-$TCP_PORT}"
+      done | paste -sd, - 2>/dev/null || true)"
+      print -r -- "tcp ${targets:-unresolved} (min $HEALTH_MIN_SUCCESS)"
       ;;
     *)
       print -r -- "tunnel"
@@ -295,16 +321,26 @@ health_check_description() {
 }
 
 health_check_ok() {
-  local mode target info
+  local mode target info successes=0 total=0
   mode="$(resolved_health_check_mode)"
   case "$mode" in
     ping)
-      target="$(resolve_ping_target || true)"
-      ping_target_ok "$target"
+      while IFS= read -r target; do
+        [[ -n "$target" ]] || continue
+        total=$((total + 1))
+        ping_target_ok "$target" && successes=$((successes + 1))
+        (( successes >= HEALTH_MIN_SUCCESS )) && return 0
+      done <<< "$(ping_health_targets)"
+      (( total > 0 && successes >= HEALTH_MIN_SUCCESS ))
       ;;
     tcp)
-      info="$(resolve_tcp_target || true)"
-      [[ -n "$info" ]] && tcp_target_ok "$info"
+      while IFS= read -r info; do
+        [[ -n "$info" ]] || continue
+        total=$((total + 1))
+        tcp_target_ok "$info" && successes=$((successes + 1))
+        (( successes >= HEALTH_MIN_SUCCESS )) && return 0
+      done <<< "$(tcp_health_targets)"
+      (( total > 0 && successes >= HEALTH_MIN_SUCCESS ))
       ;;
     tunnel)
       return 0

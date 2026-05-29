@@ -55,14 +55,21 @@ Useful config fields:
 - `KEYCHAIN_SERVICE`: Keychain service name used for the password lookup. Keep
   this aligned with `set-password`.
 - `HEALTH_CHECK_MODE`: `auto`, `ping`, `tcp`, or `tunnel`. `auto` uses
-  `TCP_TARGET` if set, otherwise `PING_TARGET` or `SSH_HOST_ALIAS`, otherwise
-  tunnel presence.
+  `TCP_TARGETS`/`TCP_TARGET` if set, otherwise `PING_TARGETS`/`PING_TARGET` or
+  `SSH_HOST_ALIAS`, otherwise tunnel presence.
+- `HEALTH_MIN_SUCCESS`: number of health targets that must pass. The default is
+  `1`, so one down internal host does not force a reconnect if another target
+  is reachable.
 - `SSH_HOST_ALIAS`: SSH config alias to resolve with `ssh -G`, such as a host
   from `~/.ssh/config`. In `ping` mode, the resolved hostname is pinged. In
   `tcp` mode, it is checked on `TCP_PORT`.
 - `PING_TARGET`: internal host or IP to ping.
+- `PING_TARGETS`: space-separated internal hosts or IPs to ping. The check
+  succeeds when at least `HEALTH_MIN_SUCCESS` targets answer.
 - `TCP_TARGET`: internal host and optional port to check with TCP, such as
   `internal-host:22`. This avoids relying on ICMP ping.
+- `TCP_TARGETS`: space-separated TCP targets, such as
+  `host-a:22 host-b:443`.
 - `TCP_PORT`: default TCP port when `TCP_TARGET` or `SSH_HOST_ALIAS` does not
   include a port.
 - `CHROME_PROFILE_DIR`: dedicated Chrome profile for VPN login cookies.

@@ -30,26 +30,75 @@ openconnect --protocol=nc
 - A Keychain item for the user's VPN password
 - A logged-in user GUI session for browser login and Duo/MFA
 
-Install OpenConnect:
+## Recommended Setup
+
+For first-time setup, run the guided installer from the repository root:
 
 ```zsh
-brew install openconnect
+cd ..
+./setup.sh
 ```
 
-After installing and setting `UC_DAVIS_EMAIL` in the daemon config, store or
-update the password in the user's macOS Keychain:
+That script asks for the email, stores the password in Keychain, installs the
+LaunchDaemon, and writes the main settings into the daemon config. You should
+not need to edit this project's config by hand for a normal install.
+
+After setup, use:
 
 ```zsh
+ucdavis-vpnctl status
+ucdavis-vpnctl connect
+ucdavis-vpnctl disconnect
+ucdavis-vpnctl on
+ucdavis-vpnctl off
 ucdavis-vpnctl set-password
 ```
 
-## Install
+## First Use
 
-From the repository root:
+If setup starts the LaunchDaemon, the first connection may open Chrome to the
+UC Davis/Microsoft login flow. Complete the login and Duo approval there. The
+daemon captures the VPN cookie, starts OpenConnect as root, and then keeps
+watching the tunnel.
+
+Check the current state with:
 
 ```zsh
-cd ucdavis-vpn-launchdaemon
+ucdavis-vpnctl status
+```
+
+If the daemon was installed but not started, start it and connect with:
+
+```zsh
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
+ucdavis-vpnctl on
+```
+
+## Basic Commands
+
+```zsh
+ucdavis-vpnctl status        # show daemon, tunnel, health check, and cookie state
+ucdavis-vpnctl connect       # connect or reconnect now
+ucdavis-vpnctl disconnect    # drop the current tunnel; auto reconnect stays enabled
+ucdavis-vpnctl off           # pause auto reconnect and log out the tunnel
+ucdavis-vpnctl on            # resume auto reconnect and connect now
+ucdavis-vpnctl set-password  # update the Keychain password
+```
+
+`disconnect` is a tunnel reset. Because automatic reconnect remains enabled,
+the daemon may reconnect on the next failed health check. Use `off` when you
+want the VPN to stay off, and `on` to resume normal monitoring.
+
+## Manual Install
+
+Use this only if you are deliberately skipping `../setup.sh`:
+
+```zsh
+brew install openconnect node
 sudo ./install.sh
+ucdavis-vpnctl set-password
+${EDITOR:-nano} "/Library/Application Support/ucdavis-vpn-daemon/config.env"
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
 ```
 
 The installer writes:
@@ -64,13 +113,13 @@ The installer writes:
 The installer also removes the old legacy LaunchDaemon label
 `com.weyl.ucdavis-openconnect-daemon` if it is present.
 
-Start immediately during install:
+Start immediately during install instead of running `launchctl` later:
 
 ```zsh
 sudo START_AFTER_INSTALL=1 ./install.sh
 ```
 
-## Configure
+## Advanced Configure
 
 Installed config:
 

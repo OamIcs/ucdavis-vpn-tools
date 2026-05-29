@@ -34,39 +34,92 @@ Passwords are read from macOS Keychain at runtime.
 
 ## Quick Start
 
-Install dependencies:
+For a first-time install, use the guided setup from the repository root:
 
 ```zsh
-brew install openconnect
+./setup.sh
 ```
 
-For the user-level OpenConnect tool:
+The setup script asks for:
+
+- UC Davis email
+- VPN password, stored in macOS Keychain
+- a simple health-check choice
+- whether to start the LaunchDaemon now
+
+It also installs missing Homebrew dependencies if you approve, creates the user
+config, installs the root LaunchDaemon, and writes the same basic settings to
+both places.
+
+After setup:
 
 ```zsh
-cd ucdavis-openconnect-vpn
-mkdir -p ~/.config/ucdavis-openconnect-vpn
-cp config.env.example ~/.config/ucdavis-openconnect-vpn/config.env
-${EDITOR:-nano} ~/.config/ucdavis-openconnect-vpn/config.env
-bin/ucdavis-openconnect-vpn doctor
-bin/ucdavis-openconnect-vpn set-password
-```
-
-In that config, set `UC_DAVIS_EMAIL` and choose a health check. You can use
-`PING_TARGETS`, `TCP_TARGETS`, `SSH_HOST_ALIAS`, or `HEALTH_CHECK_MODE=tunnel`.
-The password is not stored in the config file; `set-password` saves it in macOS
-Keychain.
-
-For the root OpenConnect daemon:
-
-```zsh
-cd ucdavis-vpn-launchdaemon
-sudo ./install.sh
+ucdavis-vpnctl status
+ucdavis-vpnctl connect
+ucdavis-vpnctl disconnect
+ucdavis-vpnctl on
+ucdavis-vpnctl off
 ucdavis-vpnctl set-password
 ```
 
-Read each project's README before enabling automatic reconnect. The root daemon
-has its own installed config at
-`/Library/Application Support/ucdavis-vpn-daemon/config.env`.
+## First Use
+
+If `./setup.sh` starts the daemon, Chrome may open to the UC Davis/Microsoft
+login flow. Complete the login and Duo approval in that browser window. After
+the VPN connects, check:
+
+```zsh
+ucdavis-vpnctl status
+```
+
+If you skipped starting the daemon during setup, start it later with:
+
+```zsh
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
+ucdavis-vpnctl on
+```
+
+## Basic Commands
+
+```zsh
+ucdavis-vpnctl status        # show daemon, tunnel, health check, and cookie state
+ucdavis-vpnctl connect       # connect or reconnect now
+ucdavis-vpnctl disconnect    # drop the current tunnel; auto reconnect stays enabled
+ucdavis-vpnctl off           # pause auto reconnect and log out the tunnel
+ucdavis-vpnctl on            # resume auto reconnect and connect now
+ucdavis-vpnctl set-password  # update the Keychain password
+```
+
+Use `off` when you intentionally do not want the VPN to reconnect, for example
+on a network where VPN access is broken. Use `on` when you want the daemon to
+resume normal monitoring.
+
+## Config Files
+
+There are two config files because the tools run in different security contexts:
+
+- `~/.config/ucdavis-openconnect-vpn/config.env` is for the user-level helper
+  and manual debugging commands.
+- `/Library/Application Support/ucdavis-vpn-daemon/config.env` is for the root
+  LaunchDaemon that keeps the VPN connected.
+
+Most users do not need to edit either file during first install. `./setup.sh`
+keeps the important values in sync. Edit them only for advanced settings such as
+custom split routes, retry timing, browser profile paths, or multiple health
+targets.
+
+## Manual Install
+
+Use the manual path only if you do not want the guided setup:
+
+```zsh
+brew install openconnect node
+cd ucdavis-vpn-launchdaemon
+sudo ./install.sh
+ucdavis-vpnctl set-password
+${EDITOR:-nano} "/Library/Application Support/ucdavis-vpn-daemon/config.env"
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
+```
 
 ## Safety
 

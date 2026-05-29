@@ -13,7 +13,13 @@ SSH_HOST_ALIAS="${SSH_HOST_ALIAS:-}"
 PING_TARGET="${PING_TARGET:-}"
 PING_COUNT="${PING_COUNT:-2}"
 PING_TIMEOUT_MS="${PING_TIMEOUT_MS:-1500}"
+HEALTH_CHECK_MODE="${HEALTH_CHECK_MODE:-auto}"
+TCP_TARGET="${TCP_TARGET:-}"
+TCP_PORT="${TCP_PORT:-22}"
+TCP_TIMEOUT_SECONDS="${TCP_TIMEOUT_SECONDS:-3}"
 VERIFY_AFTER_CONNECT_SECONDS="${VERIFY_AFTER_CONNECT_SECONDS:-25}"
+[[ "$TCP_PORT" == <-> ]] || TCP_PORT=22
+[[ "$TCP_TIMEOUT_SECONDS" == <-> ]] || TCP_TIMEOUT_SECONDS=3
 
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/ucdavis-openconnect-vpn}"
 LOG_DIR="${LOG_DIR:-$HOME/Library/Logs/ucdavis-openconnect-vpn}"
@@ -61,6 +67,7 @@ Usage: $PROGRAM_NAME <command>
 Commands:
   status        Show openconnect process, VPN IP, and target reachability.
   doctor        Check local dependencies and keychain entry.
+  set-password  Prompt for the VPN password and store it in macOS Keychain.
   cookie        Start/reuse Chrome profile and make sure a VPN cookie exists.
   relogin       Force browser login and refresh the VPN cookie.
   connect       Acquire/reuse cookie, then start openconnect in the background.
@@ -211,6 +218,110 @@ ping_target_ok() {
   /sbin/ping -q -c "$PING_COUNT" -W "$PING_TIMEOUT_MS" "$target" >/dev/null 2>&1
 }
 
+split_tcp_target() {
+  local value="$1"
+  local default_port="${2:-$TCP_PORT}"
+  [[ -n "$value" ]] || return 1
+  if [[ "$value" == *:* ]]; then
+    print -r -- "${value%:*}|${value##*:}"
+  else
+    print -r -- "$value|$default_port"
+  fi
+}
+
+resolve_tcp_target() {
+  local host
+  if [[ -n "$TCP_TARGET" ]]; then
+    split_tcp_target "$TCP_TARGET" "$TCP_PORT"
+    return 0
+  fi
+  host="$(resolve_ping_target || true)"
+  [[ -n "$host" ]] || return 1
+  split_tcp_target "$host" "$TCP_PORT"
+}
+
+tcp_target_ok() {
+  local info="$1"
+  local -a parts
+  parts=("${(@ps:|:)info}")
+  local host="${parts[1]:-}"
+  local port="${parts[2]:-$TCP_PORT}"
+  [[ -n "$host" && "$port" == <-> ]] || return 1
+  /usr/bin/nc -G "$TCP_TIMEOUT_SECONDS" -z "$host" "$port" >/dev/null 2>&1
+}
+
+resolved_health_check_mode() {
+  case "$HEALTH_CHECK_MODE" in
+    ping|tcp|tunnel)
+      print -r -- "$HEALTH_CHECK_MODE"
+      ;;
+    auto|"")
+      if [[ -n "$TCP_TARGET" ]]; then
+        print tcp
+      elif [[ -n "$PING_TARGET" || -n "$SSH_HOST_ALIAS" ]]; then
+        print ping
+      else
+        print tunnel
+      fi
+      ;;
+    *)
+      print tunnel
+      ;;
+  esac
+}
+
+health_check_description() {
+  local mode target info
+  mode="$(resolved_health_check_mode)"
+  case "$mode" in
+    ping)
+      target="$(resolve_ping_target || true)"
+      print -r -- "ping ${target:-unresolved}"
+      ;;
+    tcp)
+      info="$(resolve_tcp_target || true)"
+      if [[ -n "$info" ]]; then
+        local -a parts
+        parts=("${(@ps:|:)info}")
+        print -r -- "tcp ${parts[1]:-unresolved}:${parts[2]:-$TCP_PORT}"
+      else
+        print -r -- "tcp unresolved:$TCP_PORT"
+      fi
+      ;;
+    *)
+      print -r -- "tunnel"
+      ;;
+  esac
+}
+
+health_check_ok() {
+  local mode target info
+  mode="$(resolved_health_check_mode)"
+  case "$mode" in
+    ping)
+      target="$(resolve_ping_target || true)"
+      ping_target_ok "$target"
+      ;;
+    tcp)
+      info="$(resolve_tcp_target || true)"
+      [[ -n "$info" ]] && tcp_target_ok "$info"
+      ;;
+    tunnel)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+vpn_session_ok() {
+  local pid
+  pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid" || return 1
+  [[ -n "$(vpn_internal_ip || true)" ]] || return 1
+  health_check_ok
+}
+
 vpn_internal_ip() {
   /sbin/ifconfig | awk '
     /^utun[0-9]+:/ { iface=$1; sub(":", "", iface) }
@@ -272,15 +383,12 @@ command_status() {
     process_status="running (pid $pid)"
   fi
 
-  local target
-  target="$(resolve_ping_target || true)"
-  local ping_status="not checked"
-  if [[ -n "$target" ]]; then
-    if ping_target_ok "$target"; then
-      ping_status="OK ($target)"
-    else
-      ping_status="FAIL ($target)"
-    fi
+  local health_status health_detail
+  health_detail="$(health_check_description)"
+  if vpn_session_ok; then
+    health_status="OK ($health_detail)"
+  else
+    health_status="FAIL ($health_detail)"
   fi
 
   local ip
@@ -306,7 +414,7 @@ command_status() {
 
   print "OpenConnect: $process_status"
   print "VPN IP:       $ip"
-  print "Ping:         $ping_status"
+  print "Health:      $health_status"
   [[ -n "$server_info" ]] && print "VPN gateway:  ${server_parts[1]:-unknown} via ${server_parts[2]:-unknown} on ${server_parts[3]:-unknown}${server_route_status}"
   print "Chrome CDP:   $cdp"
   if [[ -f "$COOKIE_META_FILE" ]]; then
@@ -343,9 +451,33 @@ command_doctor() {
   else
     print "Keychain:     missing ($KEYCHAIN_SERVICE / $UC_DAVIS_EMAIL)"
   fi
-  local target
-  target="$(resolve_ping_target || true)"
-  print "Ping target:  ${target:-unresolved}"
+  print "Health check: $(resolved_health_check_mode) ($(health_check_description))"
+}
+
+command_set_password() {
+  if [[ -z "$UC_DAVIS_EMAIL" || "$UC_DAVIS_EMAIL" == "your_email@ucdavis.edu" ]]; then
+    print -u2 "Set UC_DAVIS_EMAIL in $CONFIG_FILE before storing a password."
+    return 1
+  fi
+
+  local password
+  print "This stores the VPN password in your macOS login Keychain."
+  read -rs "password?UC Davis VPN password for $UC_DAVIS_EMAIL: "
+  print
+  if [[ -z "$password" ]]; then
+    print -u2 "Password was empty; nothing stored."
+    return 1
+  fi
+
+  /usr/bin/security add-generic-password \
+    -a "$UC_DAVIS_EMAIL" \
+    -s "$KEYCHAIN_SERVICE" \
+    -l "UC Davis VPN password" \
+    -T /usr/bin/security \
+    -U \
+    -w "$password"
+  unset password
+  print "Keychain:     OK ($KEYCHAIN_SERVICE / $UC_DAVIS_EMAIL)"
 }
 
 command_cookie() {
@@ -396,14 +528,12 @@ command_connect() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
     if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
-      local target
-      target="$(resolve_ping_target || true)"
-      if [[ -n "$target" ]] && ping_target_ok "$target"; then
+      if vpn_session_ok; then
         print "OpenConnect already running (pid $pid)."
         command_status
         return 0
       fi
-      print "OpenConnect is running (pid $pid), but the ping target is not reachable; reconnecting."
+      print "OpenConnect is running (pid $pid), but the health check failed ($(health_check_description)); reconnecting."
       signal_openconnect HUP
       sleep 2
     fi
@@ -461,10 +591,9 @@ command_connect() {
     return 1
   fi
 
-  local target elapsed=0
-  target="$(resolve_ping_target || true)"
+  local elapsed=0
   while (( elapsed < VERIFY_AFTER_CONNECT_SECONDS )); do
-    if [[ -n "$target" ]] && ping_target_ok "$target"; then
+    if vpn_session_ok; then
       break
     fi
     sleep 1
@@ -509,6 +638,7 @@ command_logout() {
 case "${1:-}" in
   status) command_status ;;
   doctor) command_doctor ;;
+  set-password|password|store-password) command_set_password ;;
   cookie) command_cookie ;;
   relogin) command_relogin ;;
   connect) command_connect ;;

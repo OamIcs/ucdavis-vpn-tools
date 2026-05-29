@@ -40,6 +40,7 @@ Usage: $PROGRAM_NAME [--config path] <command>
 No-sudo commands:
   status       Print VPN status.
   doctor       Print dependency and config checks.
+  set-password Prompt for the VPN password and store it in macOS Keychain.
   connect      Clear retry block and connect now.
   disconnect   Disconnect the tunnel, leaving auto reconnect enabled.
   logout       Log out the tunnel session, leaving auto reconnect enabled.
@@ -52,6 +53,33 @@ No-sudo commands:
 Config:
   $CONFIG_FILE
 EOF
+}
+
+command_set_password() {
+  if [[ -z "${UC_DAVIS_EMAIL:-}" || "${UC_DAVIS_EMAIL:-}" == "your_email@ucdavis.edu" ]]; then
+    print -u2 "Set UC_DAVIS_EMAIL in $CONFIG_FILE before storing a password."
+    return 1
+  fi
+
+  local service="${KEYCHAIN_SERVICE:-ucdavis-openconnect-vpn}"
+  local password
+  print "This stores the VPN password in your macOS login Keychain."
+  read -rs "password?UC Davis VPN password for $UC_DAVIS_EMAIL: "
+  print
+  if [[ -z "$password" ]]; then
+    print -u2 "Password was empty; nothing stored."
+    return 1
+  fi
+
+  /usr/bin/security add-generic-password \
+    -a "$UC_DAVIS_EMAIL" \
+    -s "$service" \
+    -l "UC Davis VPN password" \
+    -T /usr/bin/security \
+    -U \
+    -w "$password"
+  unset password
+  print "Keychain:     OK ($service / $UC_DAVIS_EMAIL)"
 }
 
 request_timeout_seconds() {
@@ -118,6 +146,9 @@ case "$COMMAND" in
     ;;
   status|doctor)
     "$ROOT_DAEMON_BIN" --config "$CONFIG_FILE" "$COMMAND"
+    ;;
+  set-password|password|store-password)
+    command_set_password
     ;;
   connect|disconnect|logout|pause|resume|once)
     send_control_request "$COMMAND"

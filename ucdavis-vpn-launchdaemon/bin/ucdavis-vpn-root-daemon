@@ -48,6 +48,10 @@ SSH_HOST_ALIAS="${SSH_HOST_ALIAS:-}"
 PING_TARGET="${PING_TARGET:-}"
 PING_COUNT="${PING_COUNT:-2}"
 PING_TIMEOUT_MS="${PING_TIMEOUT_MS:-1500}"
+HEALTH_CHECK_MODE="${HEALTH_CHECK_MODE:-auto}"
+TCP_TARGET="${TCP_TARGET:-}"
+TCP_PORT="${TCP_PORT:-22}"
+TCP_TIMEOUT_SECONDS="${TCP_TIMEOUT_SECONDS:-3}"
 SSH_CONFIG_TIMEOUT_SECONDS="${SSH_CONFIG_TIMEOUT_SECONDS:-5}"
 ROUTE_LOOKUP_TIMEOUT_SECONDS="${ROUTE_LOOKUP_TIMEOUT_SECONDS:-5}"
 CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-60}"
@@ -68,6 +72,8 @@ VPN_ROUTE_PING_TARGET="${VPN_ROUTE_PING_TARGET:-1}"
 NETWORK_CHANGE_DETECT="${NETWORK_CHANGE_DETECT:-1}"
 NETWORK_CHANGE_SETTLE_SECONDS="${NETWORK_CHANGE_SETTLE_SECONDS:-3}"
 NETWORK_CHANGE_BYPASS_COOLDOWN="${NETWORK_CHANGE_BYPASS_COOLDOWN:-1}"
+[[ "$TCP_PORT" == <-> ]] || TCP_PORT=22
+[[ "$TCP_TIMEOUT_SECONDS" == <-> ]] || TCP_TIMEOUT_SECONDS=3
 [[ "$ROUTE_LOOKUP_TIMEOUT_SECONDS" == <-> ]] || ROUTE_LOOKUP_TIMEOUT_SECONDS=5
 [[ "$NETWORK_CHANGE_SETTLE_SECONDS" == <-> ]] || NETWORK_CHANGE_SETTLE_SECONDS=3
 [[ "$NETWORK_CHANGE_BYPASS_COOLDOWN" == <-> ]] || NETWORK_CHANGE_BYPASS_COOLDOWN=1
@@ -611,7 +617,7 @@ ensure_vpn_split_routes() {
 
   if [[ "$VPN_ROUTE_PING_TARGET" == "1" ]]; then
     local target server_info server_ip
-    target="$(resolve_ping_target || true)"
+    target="$(health_check_route_target || true)"
     server_info="$(vpn_server_route_info || true)"
     local -a server_parts
     server_parts=("${(@ps:|:)server_info}")
@@ -670,13 +676,123 @@ ping_target_ok() {
   /sbin/ping -q -c "$PING_COUNT" -W "$PING_TIMEOUT_MS" "$target" >/dev/null 2>&1
 }
 
+split_tcp_target() {
+  local value="$1"
+  local default_port="${2:-$TCP_PORT}"
+  [[ -n "$value" ]] || return 1
+  if [[ "$value" == *:* ]]; then
+    print -r -- "${value%:*}|${value##*:}"
+  else
+    print -r -- "$value|$default_port"
+  fi
+}
+
+resolve_tcp_target() {
+  local host
+  if [[ -n "$TCP_TARGET" ]]; then
+    split_tcp_target "$TCP_TARGET" "$TCP_PORT"
+    return 0
+  fi
+  host="$(resolve_ping_target || true)"
+  [[ -n "$host" ]] || return 1
+  split_tcp_target "$host" "$TCP_PORT"
+}
+
+tcp_target_ok() {
+  local info="$1"
+  local -a parts
+  parts=("${(@ps:|:)info}")
+  local host="${parts[1]:-}"
+  local port="${parts[2]:-$TCP_PORT}"
+  [[ -n "$host" && "$port" == <-> ]] || return 1
+  /usr/bin/nc -G "$TCP_TIMEOUT_SECONDS" -z "$host" "$port" >/dev/null 2>&1
+}
+
+resolved_health_check_mode() {
+  case "$HEALTH_CHECK_MODE" in
+    ping|tcp|tunnel)
+      print -r -- "$HEALTH_CHECK_MODE"
+      ;;
+    auto|"")
+      if [[ -n "$TCP_TARGET" ]]; then
+        print tcp
+      elif [[ -n "$PING_TARGET" || -n "$SSH_HOST_ALIAS" ]]; then
+        print ping
+      else
+        print tunnel
+      fi
+      ;;
+    *)
+      print tunnel
+      ;;
+  esac
+}
+
+health_check_route_target() {
+  local mode info
+  mode="$(resolved_health_check_mode)"
+  case "$mode" in
+    ping)
+      resolve_ping_target
+      ;;
+    tcp)
+      info="$(resolve_tcp_target || true)"
+      [[ -n "$info" ]] || return 1
+      print -r -- "${info%%|*}"
+      ;;
+  esac
+}
+
+health_check_description() {
+  local mode target info
+  mode="$(resolved_health_check_mode)"
+  case "$mode" in
+    ping)
+      target="$(resolve_ping_target || true)"
+      print -r -- "ping ${target:-unresolved}"
+      ;;
+    tcp)
+      info="$(resolve_tcp_target || true)"
+      if [[ -n "$info" ]]; then
+        local -a parts
+        parts=("${(@ps:|:)info}")
+        print -r -- "tcp ${parts[1]:-unresolved}:${parts[2]:-$TCP_PORT}"
+      else
+        print -r -- "tcp unresolved:$TCP_PORT"
+      fi
+      ;;
+    *)
+      print -r -- "tunnel"
+      ;;
+  esac
+}
+
+health_check_ok() {
+  local mode target info
+  mode="$(resolved_health_check_mode)"
+  case "$mode" in
+    ping)
+      target="$(resolve_ping_target || true)"
+      ping_target_ok "$target"
+      ;;
+    tcp)
+      info="$(resolve_tcp_target || true)"
+      [[ -n "$info" ]] && tcp_target_ok "$info"
+      ;;
+    tunnel)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 vpn_session_ok() {
-  local target="${1:-}"
   local pid
   pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid" || return 1
   [[ -n "$(vpn_internal_ip || true)" ]] || return 1
-  [[ -z "$target" ]] && return 0
-  ping_target_ok "$target"
+  health_check_ok
 }
 
 vpn_internal_ip() {
@@ -1149,9 +1265,7 @@ command_connect() {
   fi
   local pid
   if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
-    local target
-    target="$(resolve_ping_target || true)"
-    if vpn_session_ok "$target"; then
+    if vpn_session_ok; then
       route_guard_tick
       reset_browser_session_attempts "connectivity OK"
       log "OpenConnect already running as pid $pid."
@@ -1161,7 +1275,7 @@ command_connect() {
       log "VPN reconnect is blocked by the browser session attempt limit; run '$PROGRAM_NAME connect' after manual recovery."
       return "$BROWSER_SESSION_BLOCK_RC"
     fi
-    log "OpenConnect is running as pid $pid, but the ping target is not reachable; logging out before reconnecting."
+    log "OpenConnect is running as pid $pid, but the health check failed ($(health_check_description)); logging out before reconnecting."
     signal_tracked_openconnect TERM
     sleep 2
   fi
@@ -1174,11 +1288,9 @@ command_connect() {
   repair_stale_vpn_server_route
   route_guard_tick
 
-  local target
-  target="$(resolve_ping_target || true)"
-  if vpn_session_ok "$target"; then
+  if vpn_session_ok; then
     reset_browser_session_attempts "connectivity OK"
-    log "Connectivity is already OK for $target; not starting a duplicate tunnel."
+    log "Connectivity is already OK ($(health_check_description)); not starting a duplicate tunnel."
     return 0
   fi
 
@@ -1246,15 +1358,15 @@ command_enable() {
 }
 
 command_status() {
-  local target ping_status target_route_status ip any cookie_summary
-  target="$(resolve_ping_target || true)"
-  if [[ -n "$target" ]] && ping_target_ok "$target"; then
-    ping_status="OK ($target)"
-  elif [[ -n "$target" ]]; then
-    ping_status="FAIL ($target)"
+  local target health_status target_route_status ip any cookie_summary
+  local health_detail
+  health_detail="$(health_check_description)"
+  if vpn_session_ok; then
+    health_status="OK ($health_detail)"
   else
-    ping_status="not checked"
+    health_status="FAIL ($health_detail)"
   fi
+  target="$(health_check_route_target || true)"
   target_route_status="not checked"
   if [[ -n "$target" ]]; then
     target_route_status="$(route_get "$target" | /usr/bin/awk '
@@ -1299,8 +1411,8 @@ command_status() {
   print "Config:       $CONFIG_FILE"
   print "Tracked:      $(tracked_pid_status)"
   print "VPN IP:       $ip"
-  print "Ping:         $ping_status"
-  print "Ping route:   $target_route_status"
+  print "Health:      $health_status"
+  print "Health route: $target_route_status"
   print "Default route: $current_default_status"
   print "Auto:         $(auto_reconnect_status)"
   print "Browser tries: $(browser_session_budget_status)"
@@ -1334,7 +1446,7 @@ command_doctor() {
   print "Helper:       ${COOKIE_HELPER:-not configured} $([[ -n "$COOKIE_HELPER" && -f "$COOKIE_HELPER" ]] && print OK || print missing)"
   print "OpenConnect:  $OPENCONNECT_BIN $([[ -x "$OPENCONNECT_BIN" ]] && print OK || print missing)"
   print "vpnc-script:  $VPNC_SCRIPT $([[ -x "$VPNC_SCRIPT" ]] && print OK || print missing)"
-  print "Ping target:  $(resolve_ping_target || true)"
+  print "Health check: $(resolved_health_check_mode) ($(health_check_description))"
   print "Auto:         $(auto_reconnect_status)"
   print "Browser tries: $(browser_session_budget_status)"
   local keychain_ok=1
@@ -1351,16 +1463,16 @@ command_doctor() {
 }
 
 monitor_once() {
-  local target
+  local health_detail
   route_guard_tick
-  target="$(resolve_ping_target || true)"
-  if vpn_session_ok "$target"; then
-    log "Connectivity OK: $target"
+  health_detail="$(health_check_description)"
+  if vpn_session_ok; then
+    log "Connectivity OK: $health_detail"
     reset_browser_session_attempts "connectivity OK"
     return 0
   fi
 
-  log "Connectivity failed: ${target:-unresolved target}"
+  log "Connectivity failed: $health_detail"
   [[ "$AUTO_RECONNECT" == "1" ]] || return 1
   if auto_reconnect_paused; then
     log "Auto reconnect is paused; skipping reconnect."
@@ -1374,7 +1486,7 @@ monitor_once() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
     if pid="$(pid_from_file 2>/dev/null)" && pid_running "$pid"; then
-      log "Tracked OpenConnect is running but ping failed; sending SIGTERM before reconnect."
+      log "Tracked OpenConnect is running but the health check failed; sending SIGTERM before reconnect."
       signal_tracked_openconnect TERM
     fi
   fi
@@ -1400,10 +1512,8 @@ command_run() {
   process_control_requests
 
   if [[ "$CONNECT_ON_START" == "1" && ! -f "$AUTO_RECONNECT_PAUSE_FILE" ]]; then
-    local target
     route_guard_tick
-    target="$(resolve_ping_target || true)"
-    if ! vpn_session_ok "$target"; then
+    if ! vpn_session_ok; then
       log "Startup connectivity check failed; trying connect."
       if command_connect; then
         last_attempt="$(date +%s)"
@@ -1421,7 +1531,7 @@ command_run() {
   fi
 
   while true; do
-    local target now network_change_summary network_changed
+    local now network_change_summary network_changed health_detail
     process_control_requests
     detect_network_change >/dev/null 2>&1 || true
     network_change_summary="$(consume_network_change_pending || true)"
@@ -1436,8 +1546,7 @@ command_run() {
       repair_stale_vpn_server_route
     fi
     route_guard_tick
-    target="$(resolve_ping_target || true)"
-    if vpn_session_ok "$target"; then
+    if vpn_session_ok; then
       failures=0
       blocked_logged=0
       reset_browser_session_attempts "connectivity OK"
@@ -1459,7 +1568,8 @@ command_run() {
       if (( network_changed == 1 )); then
         failures="$FAILURE_THRESHOLD"
       fi
-      log "Monitor failure $failures/$FAILURE_THRESHOLD for ${target:-unresolved target}"
+      health_detail="$(health_check_description)"
+      log "Monitor failure $failures/$FAILURE_THRESHOLD for $health_detail"
       now="$(date +%s)"
       if [[ "$AUTO_RECONNECT" == "1" ]] &&
          (( failures >= FAILURE_THRESHOLD )) &&

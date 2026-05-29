@@ -84,6 +84,10 @@ fi
 
 ensure_config_default GUI_SESSION_WAIT_SECONDS 0
 ensure_config_default GUI_SESSION_POLL_SECONDS 1
+ensure_config_default HEALTH_CHECK_MODE auto
+ensure_config_default TCP_TARGET '""'
+ensure_config_default TCP_PORT 22
+ensure_config_default TCP_TIMEOUT_SECONDS 3
 ensure_config_default MAX_BROWSER_SESSION_ATTEMPTS 2
 ensure_config_default CONTROL_POLL_SECONDS 1
 ensure_config_default PRESERVE_DEFAULT_ROUTE 1

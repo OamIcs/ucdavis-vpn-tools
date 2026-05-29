@@ -36,18 +36,11 @@ Install OpenConnect:
 brew install openconnect
 ```
 
-Store the password in Keychain, replacing the email address:
+After installing and setting `UC_DAVIS_EMAIL` in the daemon config, store or
+update the password in the user's macOS Keychain:
 
 ```zsh
-read -s "VPN_PASSWORD?UC Davis VPN password: "
-security add-generic-password \
-  -a "your_email@ucdavis.edu" \
-  -s ucdavis-openconnect-vpn \
-  -l "UC Davis VPN password" \
-  -T /usr/bin/security \
-  -U \
-  -w "$VPN_PASSWORD"
-unset VPN_PASSWORD
+ucdavis-vpnctl set-password
 ```
 
 ## Install
@@ -89,8 +82,12 @@ Important settings:
 
 ```zsh
 UC_DAVIS_EMAIL=your_email@ucdavis.edu
+HEALTH_CHECK_MODE=auto
 SSH_HOST_ALIAS=your-internal-host
 PING_TARGET=
+TCP_TARGET=
+TCP_PORT=22
+TCP_TIMEOUT_SECONDS=3
 SSH_CONFIG_TIMEOUT_SECONDS=5
 ROUTE_LOOKUP_TIMEOUT_SECONDS=5
 CHECK_INTERVAL_SECONDS=60
@@ -112,7 +109,13 @@ AUTO_RECONNECT=1
 CONNECT_ON_START=1
 ```
 
-If you do not use an SSH alias, set `PING_TARGET` to an internal IP or hostname.
+`HEALTH_CHECK_MODE` can be `auto`, `ping`, `tcp`, or `tunnel`. `auto` uses
+`TCP_TARGET` if set, otherwise `PING_TARGET` or `SSH_HOST_ALIAS`, otherwise only
+checks that OpenConnect and the `utun` VPN address exist.
+Set `TCP_TARGET=internal-host:22` if ICMP ping is blocked or you prefer checking
+a service port instead of a single ping target. Set `HEALTH_CHECK_MODE=tunnel`
+to avoid configuring any internal host, with the tradeoff that it verifies the
+tunnel is up but not that an internal service is reachable.
 When `SSH_HOST_ALIAS` is used, `SSH_CONFIG_TIMEOUT_SECONDS` bounds the `ssh -G`
 config lookup so a bad SSH config cannot hang the daemon control loop.
 `ROUTE_LOOKUP_TIMEOUT_SECONDS` bounds macOS route lookups, which can otherwise
@@ -122,7 +125,7 @@ When the daemon starts before the desktop GUI is ready after boot,
 it is available, then immediately starts the browser login helper. Set a positive
 number to use a bounded wait instead.
 `MAX_BROWSER_SESSION_ATTEMPTS=2` stops automatic browser session acquisition
-after two attempts while the VPN is still not verified by the ping monitor.
+after two attempts while the VPN is still not verified by the health check.
 The attempt state is stored under `/var/run`, so it resets after reboot. After
 fixing the network or logging in manually, a manual `connect` also clears the
 block and starts a fresh attempt:
@@ -132,8 +135,8 @@ after OpenConnect starts. This prevents the VPN route script from temporarily
 turning the tunnel into the machine-wide default internet path.
 `VPN_SPLIT_ROUTES` lists campus routes that should still go through the VPN
 tunnel while the default route stays on the physical network. `VPN_ROUTE_PING_TARGET=1`
-also pins the resolved ping target, such as an SSH alias host, through the
-tunnel.
+also pins the resolved health-check target, such as an SSH alias host or
+`TCP_TARGET`, through the tunnel.
 `NETWORK_CHANGE_DETECT=1` makes the daemon watch the physical default route and
 Wi-Fi network name during its sleep loop. When they change, it repairs stale
 routes, waits `NETWORK_CHANGE_SETTLE_SECONDS`, and checks/reconnects the VPN
@@ -159,6 +162,7 @@ Normal no-sudo control:
 ```zsh
 ucdavis-vpnctl status
 ucdavis-vpnctl doctor
+ucdavis-vpnctl set-password
 ucdavis-vpnctl connect
 ucdavis-vpnctl disconnect
 ucdavis-vpnctl logout

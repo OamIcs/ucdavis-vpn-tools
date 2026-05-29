@@ -48,17 +48,20 @@ mkdir -p ~/.config/ucdavis-openconnect-vpn
 cp config.env.example ~/.config/ucdavis-openconnect-vpn/config.env
 ${EDITOR:-nano} ~/.config/ucdavis-openconnect-vpn/config.env
 bin/ucdavis-openconnect-vpn doctor
+bin/ucdavis-openconnect-vpn set-password
 ```
 
-In that config, set `UC_DAVIS_EMAIL` and either `SSH_HOST_ALIAS` or
-`PING_TARGET`. The password is not stored in the config file; save it in macOS
-Keychain as described in `ucdavis-openconnect-vpn/README.md`.
+In that config, set `UC_DAVIS_EMAIL` and choose a health check. You can use
+`PING_TARGET`, `TCP_TARGET`, `SSH_HOST_ALIAS`, or `HEALTH_CHECK_MODE=tunnel`.
+The password is not stored in the config file; `set-password` saves it in macOS
+Keychain.
 
 For the root OpenConnect daemon:
 
 ```zsh
 cd ucdavis-vpn-launchdaemon
 sudo ./install.sh
+ucdavis-vpnctl set-password
 ```
 
 Read each project's README before enabling automatic reconnect. The root daemon

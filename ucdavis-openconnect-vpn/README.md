@@ -40,13 +40,11 @@ Edit:
 ${EDITOR:-nano} ~/.config/ucdavis-openconnect-vpn/config.env
 ```
 
-At minimum, set your UC Davis email and one reachability target:
+At minimum, set your UC Davis email and choose how the tool should verify the
+VPN:
 
 ```zsh
 UC_DAVIS_EMAIL=your_email@ucdavis.edu
-SSH_HOST_ALIAS=your-ssh-config-alias
-# or:
-PING_TARGET=internal-host-or-ip
 ```
 
 Useful config fields:
@@ -55,10 +53,18 @@ Useful config fields:
   `vpn.engineering.ucdavis.edu`.
 - `UC_DAVIS_EMAIL`: email submitted to the Microsoft/UC Davis login flow.
 - `KEYCHAIN_SERVICE`: Keychain service name used for the password lookup. Keep
-  this aligned with the `security add-generic-password -s ...` command below.
+  this aligned with `set-password`.
+- `HEALTH_CHECK_MODE`: `auto`, `ping`, `tcp`, or `tunnel`. `auto` uses
+  `TCP_TARGET` if set, otherwise `PING_TARGET` or `SSH_HOST_ALIAS`, otherwise
+  tunnel presence.
 - `SSH_HOST_ALIAS`: SSH config alias to resolve with `ssh -G`, such as a host
-  from `~/.ssh/config`.
-- `PING_TARGET`: internal host or IP to ping when no SSH alias is used.
+  from `~/.ssh/config`. In `ping` mode, the resolved hostname is pinged. In
+  `tcp` mode, it is checked on `TCP_PORT`.
+- `PING_TARGET`: internal host or IP to ping.
+- `TCP_TARGET`: internal host and optional port to check with TCP, such as
+  `internal-host:22`. This avoids relying on ICMP ping.
+- `TCP_PORT`: default TCP port when `TCP_TARGET` or `SSH_HOST_ALIAS` does not
+  include a port.
 - `CHROME_PROFILE_DIR`: dedicated Chrome profile for VPN login cookies.
 - `CLOSE_WINDOW_AFTER_COOKIE`: close the visible Chrome login tab after a VPN
   cookie is captured.
@@ -75,18 +81,10 @@ bin/ucdavis-openconnect-vpn doctor
 
 ## Keychain
 
-Store the VPN password in macOS Keychain:
+Store or update the VPN password in macOS Keychain:
 
 ```zsh
-read -s "VPN_PASSWORD?UC Davis VPN password: "
-security add-generic-password \
-  -a "your_email@ucdavis.edu" \
-  -s ucdavis-openconnect-vpn \
-  -l "UC Davis VPN password" \
-  -T /usr/bin/security \
-  -U \
-  -w "$VPN_PASSWORD"
-unset VPN_PASSWORD
+bin/ucdavis-openconnect-vpn set-password
 ```
 
 The scripts read the password at runtime and do not write it to repository
@@ -97,6 +95,7 @@ files.
 ```zsh
 bin/ucdavis-openconnect-vpn doctor
 bin/ucdavis-openconnect-vpn status
+bin/ucdavis-openconnect-vpn set-password
 bin/ucdavis-openconnect-vpn cookie
 bin/ucdavis-openconnect-vpn relogin
 bin/ucdavis-openconnect-vpn connect

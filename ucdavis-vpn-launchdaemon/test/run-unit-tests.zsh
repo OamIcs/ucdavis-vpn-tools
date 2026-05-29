@@ -34,6 +34,10 @@ SSH_HOST_ALIAS=
 PING_TARGET=127.0.0.1
 PING_COUNT=1
 PING_TIMEOUT_MS=200
+HEALTH_CHECK_MODE=ping
+TCP_TARGET=
+TCP_PORT=22
+TCP_TIMEOUT_SECONDS=1
 ROUTE_LOOKUP_TIMEOUT_SECONDS=2
 CHECK_INTERVAL_SECONDS=1
 FAILURE_THRESHOLD=1
@@ -102,5 +106,6 @@ status_output="$("$ROOT_DIR/bin/ucdavis-vpnctl" --config "$CONFIG_FILE" status)"
 print -r -- "$status_output" | /usr/bin/grep -q "Browser tries:" || fail "ctl status should include browser budget"
 print -r -- "$status_output" | /usr/bin/grep -q "Auto:" || fail "ctl status should include auto state"
 print -r -- "$status_output" | /usr/bin/grep -q "Default route:" || fail "ctl status should include default route"
+print -r -- "$status_output" | /usr/bin/grep -q "Health:" || fail "ctl status should include health state"
 
 print "ok"

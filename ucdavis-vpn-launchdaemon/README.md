@@ -106,9 +106,13 @@ The installer writes:
 ```zsh
 /usr/local/sbin/ucdavis-vpn-root-daemon
 /usr/local/bin/ucdavis-vpnctl
+/usr/local/libexec/ucdavis-openconnect-vpn/ucdavis-vpn-cookie.mjs
 /Library/Application Support/ucdavis-vpn-daemon/config.env
 /Library/LaunchDaemons/local.ucdavis-openconnect-daemon.plist
 ```
+
+The cookie helper is copied into `/usr/local/libexec` so the installed daemon
+does not read JavaScript files from the repository checkout.
 
 The installer also removes the old legacy LaunchDaemon label
 `com.weyl.ucdavis-openconnect-daemon` if it is present.

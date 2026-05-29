@@ -52,6 +52,22 @@ find_node() {
     print -r -- "$NODE_BIN"
     return 0
   fi
+  if [[ -x /opt/homebrew/bin/node ]]; then
+    print -r -- /opt/homebrew/bin/node
+    return 0
+  fi
+  if [[ -x /opt/homebrew/opt/node/bin/node ]]; then
+    print -r -- /opt/homebrew/opt/node/bin/node
+    return 0
+  fi
+  if [[ -x /usr/local/bin/node ]]; then
+    print -r -- /usr/local/bin/node
+    return 0
+  fi
+  if [[ -x /usr/local/opt/node/bin/node ]]; then
+    print -r -- /usr/local/opt/node/bin/node
+    return 0
+  fi
   if command -v node >/dev/null 2>&1; then
     command -v node
     return 0

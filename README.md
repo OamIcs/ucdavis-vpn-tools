@@ -50,6 +50,8 @@ The setup script asks for:
 It also installs missing Homebrew dependencies if you approve, creates the user
 config, installs the root LaunchDaemon, and writes the same basic settings to
 both places.
+The installer copies the browser cookie helper into `/usr/local/libexec`, so
+the daemon does not depend on the repository staying in your Documents folder.
 
 After setup:
 

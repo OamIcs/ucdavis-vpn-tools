@@ -152,8 +152,13 @@ store_keychain_password() {
 
 install_missing_dependencies() {
   local missing=()
+  local node_candidate
+  node_candidate="$(command -v node 2>/dev/null || true)"
   command -v openconnect >/dev/null 2>&1 || [[ -x /opt/homebrew/bin/openconnect || -x /usr/local/bin/openconnect ]] || missing+=(openconnect)
-  command -v node >/dev/null 2>&1 || [[ -x /opt/homebrew/bin/node || -x /usr/local/bin/node || -x /Applications/Codex.app/Contents/Resources/node ]] || missing+=(node)
+  [[ -n "$node_candidate" && "$node_candidate" != /Applications/Codex.app/* ]] ||
+    [[ -x /opt/homebrew/bin/node || -x /opt/homebrew/opt/node/bin/node ||
+       -x /usr/local/bin/node || -x /usr/local/opt/node/bin/node ]] ||
+    missing+=(node)
   (( ${#missing[@]} == 0 )) && return 0
 
   print "Missing dependencies: ${missing[*]}"

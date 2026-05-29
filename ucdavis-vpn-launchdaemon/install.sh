@@ -7,6 +7,8 @@ LEGACY_LABELS=(com.weyl.ucdavis-openconnect-daemon)
 PLIST_TEMPLATE="$ROOT_DIR/local.ucdavis-openconnect-daemon.plist"
 INSTALL_BIN="/usr/local/sbin/ucdavis-vpn-root-daemon"
 INSTALL_CTL="/usr/local/bin/ucdavis-vpnctl"
+INSTALL_LIBEXEC="/usr/local/libexec/ucdavis-openconnect-vpn"
+INSTALL_COOKIE_HELPER="$INSTALL_LIBEXEC/ucdavis-vpn-cookie.mjs"
 INSTALL_DIR="/Library/Application Support/ucdavis-vpn-daemon"
 CONFIG_FILE="$INSTALL_DIR/config.env"
 PLIST_FILE="/Library/LaunchDaemons/$LABEL.plist"
@@ -34,6 +36,63 @@ ensure_config_default() {
   fi
 }
 
+config_value() {
+  local key="$1"
+  [[ -f "$CONFIG_FILE" ]] || return 1
+  /usr/bin/awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2); exit }' "$CONFIG_FILE" |
+    /usr/bin/sed -e 's/^"//' -e 's/"$//'
+}
+
+quote_config_value() {
+  local value="$1"
+  if [[ -z "$value" ]]; then
+    print '""'
+    return 0
+  fi
+  if [[ "$value" == *[[:space:]\"\\\$\\\`]* ]]; then
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//\$/\\$}"
+    value="${value//\`/\\\`}"
+    print -r -- "\"$value\""
+  else
+    print -r -- "$value"
+  fi
+}
+
+set_config_value() {
+  local key="$1"
+  local value="$2"
+  local encoded tmp
+  encoded="$(quote_config_value "$value")"
+  tmp="$CONFIG_FILE.tmp.$$"
+  /usr/bin/awk -v key="$key" -v line="$key=$encoded" '
+    BEGIN { done=0 }
+    $0 ~ "^" key "=" {
+      if (!done) print line
+      done=1
+      next
+    }
+    { print }
+    END {
+      if (!done) print line
+    }
+  ' "$CONFIG_FILE" > "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+}
+
+detect_homebrew_node() {
+  if [[ -x /opt/homebrew/bin/node ]]; then
+    print -r -- /opt/homebrew/bin/node
+  elif [[ -x /opt/homebrew/opt/node/bin/node ]]; then
+    print -r -- /opt/homebrew/opt/node/bin/node
+  elif [[ -x /usr/local/bin/node ]]; then
+    print -r -- /usr/local/bin/node
+  elif [[ -x /usr/local/opt/node/bin/node ]]; then
+    print -r -- /usr/local/opt/node/bin/node
+  fi
+}
+
 remove_legacy_launchdaemons() {
   local legacy_label legacy_plist
   for legacy_label in "${LEGACY_LABELS[@]}"; do
@@ -53,7 +112,7 @@ console_uid="$(/usr/bin/id -u "$console_user")"
 console_home="$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory | /usr/bin/awk '{print $2}')"
 project_root="${ROOT_DIR:h}"
 
-mkdir -p /usr/local/sbin /usr/local/bin "$INSTALL_DIR" "$LOG_DIR" "$DB_DIR" "$STATE_DIR"
+mkdir -p /usr/local/sbin /usr/local/bin "$INSTALL_LIBEXEC" "$INSTALL_DIR" "$LOG_DIR" "$DB_DIR" "$STATE_DIR"
 remove_legacy_launchdaemons
 
 if [[ ! -f "$PLIST_TEMPLATE" ]]; then
@@ -63,6 +122,7 @@ fi
 
 install -m 0755 "$ROOT_DIR/bin/ucdavis-vpn-root-daemon" "$INSTALL_BIN"
 install -m 0755 "$ROOT_DIR/bin/ucdavis-vpnctl" "$INSTALL_CTL"
+install -m 0755 "$project_root/ucdavis-openconnect-vpn/bin/ucdavis-vpn-cookie.mjs" "$INSTALL_COOKIE_HELPER"
 
 if [[ -f "$CONFIG_FILE" ]]; then
   backup="$CONFIG_FILE.backup.$(/bin/date +%Y%m%d-%H%M%S)"
@@ -103,15 +163,28 @@ ensure_config_default NETWORK_CHANGE_BYPASS_COOLDOWN 1
 ensure_config_default SSH_CONFIG_TIMEOUT_SECONDS 5
 ensure_config_default ROUTE_LOOKUP_TIMEOUT_SECONDS 5
 ensure_config_default CLOSE_EXISTING_VPN_SESSIONS 1
+
+set_config_value COOKIE_HELPER "$INSTALL_COOKIE_HELPER"
+detected_node="$(detect_homebrew_node || true)"
+current_node="$(config_value NODE_BIN 2>/dev/null || true)"
+if [[ -n "$detected_node" && ( -z "$current_node" || "$current_node" == /Applications/Codex.app/* ) ]]; then
+  set_config_value NODE_BIN "$detected_node"
+  print "Updated daemon Node binary: $detected_node"
+elif [[ "$current_node" == /Applications/Codex.app/* ]]; then
+  set_config_value NODE_BIN ""
+  print "Cleared Codex.app Node path from daemon config; install Homebrew node if the daemon cannot find node."
+fi
+
 if /usr/bin/grep -q '^MAX_BROWSER_SESSION_ATTEMPTS=3$' "$CONFIG_FILE"; then
   /usr/bin/sed -i '' 's/^MAX_BROWSER_SESSION_ATTEMPTS=3$/MAX_BROWSER_SESSION_ATTEMPTS=2/' "$CONFIG_FILE"
   print "Updated default config: MAX_BROWSER_SESSION_ATTEMPTS=2"
 fi
 
 install -m 0644 "$PLIST_TEMPLATE" "$PLIST_FILE"
-chown root:wheel "$INSTALL_BIN" "$INSTALL_CTL" "$PLIST_FILE"
+chown root:wheel "$INSTALL_BIN" "$INSTALL_CTL" "$INSTALL_COOKIE_HELPER" "$PLIST_FILE"
 chmod 0755 "$INSTALL_BIN"
 chmod 0755 "$INSTALL_CTL"
+chmod 0755 "$INSTALL_COOKIE_HELPER"
 chmod 0644 "$PLIST_FILE"
 
 /usr/bin/plutil -lint "$PLIST_FILE"
@@ -119,6 +192,7 @@ chmod 0644 "$PLIST_FILE"
 print "Installed:"
 print "  $INSTALL_BIN"
 print "  $INSTALL_CTL"
+print "  $INSTALL_COOKIE_HELPER"
 print "  $CONFIG_FILE"
 print "  $PLIST_FILE"
 
